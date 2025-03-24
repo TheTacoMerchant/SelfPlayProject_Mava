@@ -1,17 +1,19 @@
 import pickle
 import pathlib
 from typing import Tuple, Optional
+import subprocess
+import tempfile
 
 import hydra
 import orbax.checkpoint
-from mava.experiments.utils import load_params_from_checkpoint, simulate_traj
+from mava.experiments.utils import load_params_from_checkpoint, simulate_traj, simulate_traj_vs_heuristic
 from mava.networks import FeedForwardActor as Actor
 from jax import tree
 import jax
 import jax.numpy as jnp
-from mava.experiments.smax.smax_env import SMAX
+from jaxmarl.environments.smax import HeuristicEnemySMAX
+from mava.experiments.smax.smax_env import SMAX, map_name_to_scenario
 from mava.experiments.smax.heuristic_enemy_smax_env import EnemySMAX
-from mava.experiments.smax import map_name_to_scenario
 import matplotlib.pyplot as plt
 from matplotlib import animation
 
@@ -161,21 +163,65 @@ def pytree_to_list(pytree):
 
     return result
 
-def visualize_episode(env, traj, filename):
+def visualize_episode_old(env, traj, filename):
     state_seq = pytree_to_list(traj)
 
     viz = SMAXVisualizer(env, state_seq)
 
     viz.animate(filename, view=False)
 
-def load(ally_model_path, enemy_model_path, config_path):
-        # Load models
-    ally_net, ally_params = pickle.load(open(ally_model_path, 'rb'))
-    ally_params = jax.tree.map(lambda x : x[0][0], ally_params)
-    enemy_net, enemy_params = pickle.load(open(enemy_model_path, 'rb'))
-    config = pickle.load(open(config_path, "rb"))
+def visualize_episode(env: SMAX, traj, output_dir: pathlib.Path, filename:str, fps=10):
+    state_seq = pytree_to_list(traj)
 
-    return ((ally_net, ally_params), (enemy_net, enemy_params), config)
+    exp_state_seq = env.expand_state_seq(state_seq)
+
+    steps_per_frame = 4
+    with tempfile.TemporaryDirectory() as tmpdir:
+        for frame, step in enumerate(range(0, len(exp_state_seq), steps_per_frame)):
+            # Clear any previous plots to avoid memory issues
+            plt.clf()
+            
+            # Create a new figure for each frame
+            fig, ax = plt.subplots()
+            
+            # Generate your plot for this specific frame
+            env.update_render(
+                ax,
+                exp_state_seq[step],
+                step % env.world_steps_per_env_step,
+                step // env.world_steps_per_env_step,
+            )
+            
+            # Save the frame with zero-padded numbering (important for ffmpeg)
+            tmp_dir = pathlib.Path(tmpdir)
+            plt.savefig(tmp_dir / f"frame_{frame:04d}.png", dpi=100, bbox_inches='tight')
+            
+            # Close the figure to free up memory
+            plt.close(fig)
+            print(f'{frame} done')
+    
+        # Build the ffmpeg command
+        output_filename = str((output_dir / filename).absolute())
+        cmd = [
+            'ffmpeg',
+            '-y',  # Overwrite output file if it exists
+            '-r', str(fps),  # Frame rate
+            '-i', f"{tmp_dir}/frame_%04d.png",  # Input pattern
+            '-c:v', 'libx264',  # Video codec
+            '-crf', '23',  # Constant Rate Factor (quality)
+            '-pix_fmt', 'yuv444p',  # Pixel format for compatibility
+            # Add padding for non-even dimensions (if needed)
+            # '-vf', 'pad=width=ceil(iw/2)*2:height=ceil(ih/2)*2',
+            output_filename  # Output file
+        ]
+
+        try:
+            # To capture output: stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            # To hide output: stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            result = subprocess.run(cmd, check=True)
+            print(f"Video created successfully: {output_filename}")
+        except subprocess.CalledProcessError as e:
+            print(f"Error creating video: {e}")
 
 def viz_specific(ally_params, enemy_params, config, filename, max_search=100, ally_won_cond=False):
     kwargs = dict(config.env.kwargs)
@@ -203,6 +249,34 @@ def viz_specific(ally_params, enemy_params, config, filename, max_search=100, al
         if bool(ally_won) == ally_won_cond:
             traj= jax.tree.map(lambda x : x[:done_idx+1], traj)
             visualize_episode(env, traj[:3], filename)
+            break
+
+def viz_specific_vs_heuristic(ally_params, config, filename, max_search=100, ally_won_cond=False, output_dir = pathlib.Path("viz_out")):
+    kwargs = dict(config.env.kwargs)
+    kwargs["scenario"] = map_name_to_scenario(config.env.scenario.task_name)
+
+    # Define network and optimiser.
+    actor_torso = hydra.utils.instantiate(config.network.actor_network.pre_torso)
+    action_head = {"_target_": "mava.networks.heads.DiscreteActionHead"}
+    actor_action_head = hydra.utils.instantiate(action_head, action_dim=10)
+
+    network = Actor(torso=actor_torso, action_head=actor_action_head)
+
+    # Initialize environment
+    env = HeuristicEnemySMAX(**kwargs)
+
+    key = jax.random.PRNGKey(2025)
+    for i in range(max_search):
+        key, traj_key = jax.random.split(key)
+
+        traj = simulate_traj_vs_heuristic(traj_key, env, network, ally_params)
+        done_idx = jnp.argmax(traj[4]["__all__"])
+        done_idx = jnp.where(done_idx == 0, 200, done_idx).item()
+        ally_won = jnp.any(traj[3]["ally_0"][:done_idx+1] >= 1)
+
+        if bool(ally_won) == ally_won_cond:
+            traj= jax.tree.map(lambda x : x[:done_idx+1], traj)
+            visualize_episode(env, traj[:3], output_dir, filename)
             break
 
 def viz_random(ally_model_path, enemy_model_path, config_path, filename="random.gif"):
@@ -236,11 +310,13 @@ def viz_random(ally_model_path, enemy_model_path, config_path, filename="random.
 )
 def hydra_entry_point(cfg):
     checkpointer = orbax.checkpoint.PyTreeCheckpointer()
-    base_dir = (pathlib.Path().parent.parent / "checkpoints/self_play").absolute()
-    ally_params = load_params_from_checkpoint(checkpointer, base_dir / "2025_02_25_11_11_21/9")
-    enemy_params = load_params_from_checkpoint(checkpointer, base_dir / "2025_02_25_11_11_21/8")
+    base_dir = (pathlib.Path().parent.parent / "checkpoints/league").absolute()
+    ally_params = load_params_from_checkpoint(checkpointer, base_dir / "2025_02_28_13_43_10/4")
+    enemy_params = load_params_from_checkpoint(checkpointer, base_dir / "2025_02_28_13_43_10/5")
 
-    viz_specific(ally_params, enemy_params, cfg, "trained_sp_1_a9_e8.mp4", ally_won_cond=True)
+    # viz_specific(ally_params, enemy_params, cfg, "trained_sp_1_a9_e8.mp4", ally_won_cond=False)
+    viz_specific_vs_heuristic(ally_params, cfg, "trained_sp_02_28_a4_heuristic_win.mp4", ally_won_cond=True)
+    viz_specific_vs_heuristic(ally_params, cfg, "trained_sp_02_28_a4_heuristic_loss.mp4", ally_won_cond=False)
     print('done!')
 
 if __name__ == "__main__":

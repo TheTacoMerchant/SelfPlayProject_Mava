@@ -1,8 +1,9 @@
+from mava.networks import FeedForwardActor as Actor
 from mava.types import Observation
 from mava.wrappers.jaxmarl import batchify
-from mava.experiments.smax import SMAX
+from mava.experiments.smax.smax_env import SMAX, map_name_to_scenario
 
-
+import hydra
 import jax
 import jax.numpy as jnp
 
@@ -101,6 +102,70 @@ def simulate_traj(key, env: SMAX, ally_net, ally_params, enemy_net, enemy_params
 
         action_cat = jnp.concatenate([ally_actions, enemy_actions], -1)
         actions = {x:action_cat[i] for i, x in enumerate(ally_agents+enemy_agents)}
+
+        obs, new_state, rewards, dones, infos = env.step(step_key, state, actions)
+
+        return ((new_state, key), (step_key, state, actions, rewards, dones, infos))
+
+    _, traj = jax.lax.scan(_step, (state, key), None, length=200)
+
+    return traj
+
+
+def calculate_winrate(ally, enemy, config, num_traj = 100):
+    key = jax.random.PRNGKey(2025)
+    key, *traj_keys = jax.random.split(key, num_traj+1)
+
+    kwargs = dict(config.env.kwargs)
+    kwargs["scenario"] = map_name_to_scenario(config.env.scenario.task_name)
+
+    # Define network and optimiser.
+    actor_torso = hydra.utils.instantiate(config.network.actor_network.pre_torso)
+    action_head = {"_target_": "mava.networks.heads.DiscreteActionHead"}
+    actor_action_head = hydra.utils.instantiate(action_head, action_dim=10)
+
+    network = Actor(torso=actor_torso, action_head=actor_action_head)
+
+    # Initialize environment
+    env = SMAX(**kwargs)
+
+    traj = jax.vmap(simulate_traj, in_axes=[0,None,None,None,None,None])(jnp.stack(traj_keys), env, network, ally, network, enemy)
+    done_idxes = jnp.argmax(traj[4]["__all__"], axis=1)
+    done_idxes = jnp.where(done_idxes == 0, 200, done_idxes)
+
+    won_episodes = 0
+    enemy_won = 0
+    for i in range(num_traj):
+        won_episodes += 1 if jnp.any(traj[3]["ally_0"][i][:done_idxes[i]+1] >= 1) else 0
+        enemy_won += 1 if jnp.any(traj[3]["enemy_0"][i][:done_idxes[i]+1] >= 1) else 0
+
+    return won_episodes / num_traj
+
+
+def simulate_traj_vs_heuristic(key, env, network, params):
+    key, reset_key = jax.random.split(key)
+    _, state = env.reset(reset_key)
+
+    @jax.jit
+    def _step(carry, _):
+        state, key = carry
+
+        agents = [f"ally_{i}" for i in range(env.num_allies)]
+
+        # jax.debug.breakpoint()
+        obs = env.get_obs_unit_list(state.state)
+        obs = jnp.array([obs[agent] for agent in agents])
+
+        obs = Observation(
+            agents_view=obs,
+            action_mask=batchify(env.get_avail_actions(state), agents),
+        )
+
+        key, ally_key, step_key = jax.random.split(key, 3)
+        policy = network.apply(params, obs)
+        actions = policy.sample(seed=ally_key)
+
+        actions = {x:actions[i] for i, x in enumerate(agents)}
 
         obs, new_state, rewards, dones, infos = env.step(step_key, state, actions)
 

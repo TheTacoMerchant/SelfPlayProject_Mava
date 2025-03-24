@@ -972,7 +972,6 @@ class SMAX(MultiAgentEnv):
         env_step: int,
     ):
         from matplotlib.patches import Circle, Rectangle
-        import matplotlib.pyplot as plt
         import numpy as np
 
         _, state, actions = state
@@ -1072,8 +1071,6 @@ class SMAX(MultiAgentEnv):
         w, h = ax.figure.canvas.get_width_height()
         im = data.reshape((w, h, -1))
 
-        return ax.imshow(im)
-
     def update_render(
         self,
         im,
@@ -1082,7 +1079,7 @@ class SMAX(MultiAgentEnv):
         env_step: int,
     ):
         ax = im.axes
-        return self.init_render(ax, state, step, env_step)
+        self.init_render(ax, state, step, env_step)
 
     def render_just_circles(self, state):
         from matplotlib.patches import Circle, Rectangle

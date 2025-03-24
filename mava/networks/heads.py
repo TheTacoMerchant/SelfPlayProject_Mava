@@ -45,9 +45,7 @@ class DiscreteActionHead(nn.Module):
         -------
             A transformed tfd.categorical distribution on the action space for action sampling.
 
-        NOTE: We pass both the observation embedding and the observation object to the action head
-        since the observation object contains the action mask and other potentially useful
-        information.
+        NOTE: We pass both the observation embedding and action mask to the action head.
 
         """
         actor_logits = nn.Dense(self.action_dim, kernel_init=orthogonal(0.01))(obs_embedding)

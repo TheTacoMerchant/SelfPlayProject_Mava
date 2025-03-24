@@ -3,8 +3,11 @@ defaults:
   - arch: anakin
   - system: ppo/ff_ippo
   - network: mlp  # [mlp, cnn]
-  - env: rware  # [cleaner, connector, vector-connector, gigastep, lbf, mabrax, matrax, rware, smax, mpe]
+  - env: smax  # [cleaner, connector, vector-connector, gigastep, lbf, mabrax, matrax, rware, smax, mpe]
   - _self_
+
+system:
+  add_agent_id: False
 
 hydra:
   searchpath:

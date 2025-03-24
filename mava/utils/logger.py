@@ -24,6 +24,7 @@ import jax
 import neptune
 import numpy as np
 from colorama import Fore, Style
+import jax.numpy as jnp
 from jax import tree
 from jax.typing import ArrayLike
 from marl_eval.json_tools import JsonLogger as MarlEvalJsonLogger
@@ -81,19 +82,7 @@ class MavaLogger:
 
     def calc_winrate(self, episode_metrics: Dict, event: LogEvent) -> Dict:
         """Log the win rate of the environment's episodes."""
-        # Get the number of episodes used to evaluate.
-        if event == LogEvent.ABSOLUTE:
-            # To measure the absolute metric, we evaluate the best policy
-            # found across training over 10 times the evaluation episodes.
-            # For more details on the absolute metric please see:
-            # https://arxiv.org/abs/2209.10485.
-            n_episodes = self.cfg.arch.num_eval_episodes * 10
-        else:
-            n_episodes = self.cfg.arch.num_eval_episodes
-
-        # Calculate the win rate.
-        n_won_episodes: int = np.sum(episode_metrics["won_episode"])
-        win_rate = (n_won_episodes / n_episodes) * 100
+        win_rate = jnp.mean(episode_metrics["won_episode"]) * 100
 
         episode_metrics["win_rate"] = win_rate
         episode_metrics.pop("won_episode")

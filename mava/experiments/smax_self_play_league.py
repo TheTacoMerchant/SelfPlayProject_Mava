@@ -35,10 +35,12 @@ from rich.pretty import pprint
 
 from mava.experiments.smax.heuristic_enemy_smax_env import (
     HeuristicEnemySMAX,
-    LearnedPolicyEnemySMAX,
 )
+from mava.experiments.smax.league_smax import LeagueSMAX, LeagueManager
 from mava.experiments.smax import map_name_to_scenario
+from mava.experiments.arena import calculate_winrate_vs_heuristic
 from mava.evaluator import get_eval_fn, make_ff_eval_act_fn
+from mava.experiments.smax.league_smax import LeagueState
 from mava.networks import FeedForwardActor as Actor
 from mava.networks import FeedForwardValueNet as Critic
 from mava.systems.ppo.types import LearnerState, OptStates, Params, PPOTransition
@@ -63,13 +65,12 @@ from mava.wrappers import SmaxWrapper
 from mava.wrappers.jaxmarl import batchify
 
 
-def make_envs(config, enemy_net: Actor, enemy_params: FrozenDict):
+def make_envs(config, network: Actor, league_state: LeagueState):
     kwargs = dict(config.env.kwargs)
     kwargs["scenario"] = map_name_to_scenario(config.env.scenario.task_name)
 
-    train = SmaxWrapper(LearnedPolicyEnemySMAX(enemy_net, enemy_params, **kwargs), False)
-
-    eval = SmaxWrapper(LearnedPolicyEnemySMAX(enemy_net, enemy_params, **kwargs), False)
+    train = SmaxWrapper(LeagueSMAX(network, league_state, **kwargs), False)
+    eval = SmaxWrapper(LeagueSMAX(network, league_state, **kwargs), False)
 
     return environments.add_extra_wrappers(train, eval, config)
 
@@ -444,7 +445,7 @@ def learner_setup(
     return learn, actor_network, init_learner_state
 
 
-def run_self_play_experiment(_config: DictConfig):
+def run_league_experiment(_config: DictConfig):
     """Runs experiment."""
     _config.logger.system_name = "sp_ff_ippo"
     config = copy.deepcopy(_config)
@@ -455,35 +456,69 @@ def run_self_play_experiment(_config: DictConfig):
     cfg["arch"]["devices"] = jax.devices()
     pprint(cfg)
 
+    # Setup checkpointing
     orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
-    save_dir = (pathlib.Path().parent.parent / f"checkpoints/self_play/{datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")}").absolute()
-
-
+    timestamp = datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
+    save_dir = (pathlib.Path().absolute() / f"checkpoints/league/{timestamp}").absolute()
+    save_dir.mkdir(exist_ok=True, parents=True)
+    
+    # Initialize league
+    league = LeagueManager()
+    
     key = jax.random.PRNGKey(config.system.seed)
-
-    actor_params = None
+    
+    # Add initial policy to league
+    key, init_actor_key = jax.random.split(key)
+    actor_network, actor_params = enemy_setup(init_actor_key, config)
+    league_state = league.reset(actor_params)
     critic_params = None
+    
+    # Save initial checkpoint
+    save_args = orbax_utils.save_args_from_target(actor_params)
+    orbax_checkpointer.save(save_dir / "random", actor_params, save_args=save_args)
+    
+    # Self-play training loop
+    t=0
     for sp_iter in range(config.system.num_self_play_steps):
+        print(f"{Fore.GREEN}Starting self-play iteration {sp_iter+1}/{config.system.num_self_play_steps}{Style.RESET_ALL}")
+        
+        # Train against the league
         key, sp_key = jax.random.split(key)
-        actor_params, critic_params = self_play_step(sp_key, actor_params, critic_params, logger, config)
+        actor_params, critic_params, t = self_play_step(sp_key,actor_network, actor_params, critic_params, logger, config, league_state, t)
 
-        #Save Checkpoint
+        if sp_iter % config.system.steps_per_heuristic_eval == 0:
+            print(f"{Fore.GREEN} Calculating WR vs Heuristic Enemy {sp_iter+1}/{config.system.num_self_play_steps}{Style.RESET_ALL}")
+            wr = calculate_winrate_vs_heuristic(actor_params, config)
+            logger.log({"winrate_vs_heuristic": wr}, sp_iter, sp_iter/config.system.steps_per_heuristic_eval, LogEvent.ABSOLUTE)
+        
+        league_state = league.add_policy(actor_params, league_state, config)
+        
+        # Save checkpoint for this iteration
         save_args = orbax_utils.save_args_from_target(actor_params)
-        orbax_checkpointer.save(save_dir/str(sp_iter), actor_params, save_args=save_args)
+        orbax_checkpointer.save(save_dir / str(sp_iter), actor_params, save_args=save_args)
 
 
-def self_play_step(key, actor_params, critic_params, logger, config):
-    key, setup_key, eval_key, rand_actor_key = jax.random.split(key,4)
+def self_play_step(key, network, actor_params, critic_params, logger: MavaLogger, config, league_state, t):
+    """Train a policy against an opponent.
+    
+    Args:
+        key: Random key
+        actor_params: Parameters of the policy to train (None for fresh initialization)
+        critic_params: Parameters of the critic (None for fresh initialization)
+        logger: Logger instance
+        config: Configuration
+        league_state: State of the League
+        
+    Returns:
+        Updated actor and critic parameters
+    """
+    key, setup_key, eval_key = jax.random.split(key,3)
+    
+    env, eval_env = make_envs(config, network, league_state)
 
-    if actor_params is None:
-        actor_network, actor_params = enemy_setup(rand_actor_key, config)
-    else:
-        actor_network, _ = enemy_setup(rand_actor_key, config)
 
-    env, eval_env = make_envs(config, actor_network, actor_params)
-
-    # Setup learner.
-    learn, actor_network, learner_state = learner_setup(
+    # Setup learner with provided parameters or initialize new ones
+    learn, network, learner_state = learner_setup(
         env, setup_key, config, actor_params, critic_params
     )
 
@@ -491,7 +526,7 @@ def self_play_step(key, actor_params, critic_params, logger, config):
     # One key per device for evaluation.
     n_devices = len(jax.devices())
     eval_keys = jax.random.split(eval_key, n_devices)
-    eval_act_fn = make_ff_eval_act_fn(actor_network.apply, config)
+    eval_act_fn = make_ff_eval_act_fn(network.apply, config)
     evaluator = get_eval_fn(eval_env, eval_act_fn, config, absolute_metric=False)
 
     # Calculate number of updates per evaluation.
@@ -513,7 +548,7 @@ def self_play_step(key, actor_params, critic_params, logger, config):
 
         # Log the results of the training.
         elapsed_time = time.time() - start_time
-        t = int(steps_per_rollout * (eval_step + 1))
+        t += steps_per_rollout
         episode_metrics, ep_completed = get_final_step_metrics(learner_output.episode_metrics)
         episode_metrics["steps_per_second"] = steps_per_rollout / elapsed_time
 
@@ -535,8 +570,10 @@ def self_play_step(key, actor_params, critic_params, logger, config):
         eval_metrics = evaluator(trained_params, eval_keys, {})
         logger.log(eval_metrics, t, eval_step, LogEvent.EVAL)
 
-        if jnp.mean(eval_metrics["win_rate"]) > 90:
-            return (unreplicate_n_dims(learner_state.params.actor_params), unreplicate_n_dims(learner_state.params.critic_params))
+        if jnp.mean(eval_metrics["win_rate"]) > 99:
+            return (unreplicate_n_dims(learner_state.params.actor_params), unreplicate_n_dims(learner_state.params.critic_params), t)
+
+    return (unreplicate_n_dims(learner_state.params.actor_params), unreplicate_n_dims(learner_state.params.critic_params), t)
 
 
 @hydra.main(
@@ -553,7 +590,7 @@ def hydra_entry_point(cfg: DictConfig) -> float:
     cfg.system.seed = 2025
 
     # Run experiment.
-    eval_performance = run_self_play_experiment(cfg)
+    eval_performance = run_league_experiment(cfg)
     # eval_performance = run_experiment(cfg)
     print(f"{Fore.CYAN}{Style.BRIGHT}IPPO experiment completed{Style.RESET_ALL}")
     return eval_performance

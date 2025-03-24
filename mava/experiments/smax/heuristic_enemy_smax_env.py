@@ -7,7 +7,7 @@ from mava.experiments.smax.heuristic_enemy import (
 )
 from jaxmarl.environments.multi_agent_env import MultiAgentEnv
 import chex
-from typing import Dict, Optional, Tuple
+from typing import Dict, Tuple
 import jax.numpy as jnp
 import jax
 from flax.struct import dataclass
@@ -76,7 +76,7 @@ class EnemySMAX(MultiAgentEnv):
         enemy_obs = jnp.array([enemy_obs[agent] for agent in self.enemy_agents])
         key, action_key = jax.random.split(key)
         enemy_actions, enemy_policy_state = self.get_enemy_actions(
-            action_key, state.enemy_policy_state, enemy_obs, state
+            action_key, state.enemy_policy_state, enemy_obs, jaxmarl_state
         )
         enemy_actions = jnp.array([enemy_actions[i] for i in self.enemy_agents])
         actions = jnp.array([actions[i] for i in self.agents])
@@ -203,7 +203,7 @@ class LearnedPolicyEnemySMAX(EnemySMAX):
     def get_enemy_actions(self, key, policy_state, enemy_obs, state):
         enemy_obs = Observation(
             agents_view=enemy_obs,
-            action_mask=batchify(self._env.get_avail_actions(state.state), self.enemy_agents),
+            action_mask=batchify(self._env.get_avail_actions(state), self.enemy_agents),
         )
         pi = self.policy.apply(policy_state, enemy_obs)
         enemy_actions = pi.sample(seed=key)
@@ -215,11 +215,3 @@ class LearnedPolicyEnemySMAX(EnemySMAX):
         return enemy_actions, policy_state
 
 
-class LeagueSMAX(EnemySMAX):
-    def __init__(self, **env_kwargs):
-        super().__init__(**env_kwargs)
-        self.league_state = None
-        self.policy = None
-
-    def _select_opponent(self):
-        

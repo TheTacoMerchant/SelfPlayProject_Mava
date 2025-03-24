@@ -12,10 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
 import queue
 import threading
 import time
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Sequence, Tuple, Union
 
 import jax
 import jax.numpy as jnp
@@ -25,8 +26,8 @@ from jax.sharding import Sharding
 from jumanji.types import TimeStep
 
 # todo: remove the ppo dependencies when we make sebulba for other systems
-from mava.systems.ppo.types import HiddenStates, Params
-from mava.types import MavaTransition, Metrics
+from mava.systems.ppo.types import Params, PPOTransition
+from mava.types import Metrics
 
 QUEUE_PUT_TIMEOUT = 100
 
@@ -45,7 +46,7 @@ class ThreadLifetime:
 
 
 @jax.jit
-def _stack_trajectory(trajectory: List[MavaTransition]) -> MavaTransition:
+def _stack_trajectory(trajectory: List[PPOTransition]) -> PPOTransition:
     """Stack a list of parallel_env transitions into a single
     transition of shape [rollout_len, num_envs, ...]."""
     return tree.map(lambda *x: jnp.stack(x, axis=0).swapaxes(0, 1), *trajectory)  # type: ignore
@@ -91,10 +92,7 @@ class Pipeline(threading.Thread):
                 continue
 
     def put(
-        self,
-        traj: Sequence[MavaTransition],
-        metrics: Tuple[Dict, List[Dict]],
-        final_timestep: Tuple[TimeStep, Optional[HiddenStates]],
+        self, traj: Sequence[PPOTransition], timestep: TimeStep, metrics: Tuple[Dict, List[Dict]]
     ) -> None:
         """Put a trajectory on the queue to be consumed by the learner."""
         start_condition, end_condition = (threading.Condition(), threading.Condition())
@@ -104,7 +102,7 @@ class Pipeline(threading.Thread):
 
         # [Transition(num_envs)] * rollout_len -> Transition[done=(num_envs, rollout_len, ...)]
         traj = _stack_trajectory(traj)
-        traj, final_timestep = jax.device_put((traj, final_timestep), device=self.sharding)
+        traj, timestep = jax.device_put((traj, timestep), device=self.sharding)
 
         time_dict, episode_metrics = metrics
         # [{'metric1' : value1, ...} * rollout_len -> {'metric1' : [value1, value2, ...], ...}
@@ -119,7 +117,7 @@ class Pipeline(threading.Thread):
         # We use a try-finally so the lock is released even if an exception is raised.
         try:
             self._queue.put(
-                (traj, time_dict, episode_metrics, final_timestep),
+                (traj, timestep, time_dict, episode_metrics),
                 block=True,
                 timeout=QUEUE_PUT_TIMEOUT,
             )
@@ -138,7 +136,7 @@ class Pipeline(threading.Thread):
 
     def get(
         self, block: bool = True, timeout: Union[float, None] = None
-    ) -> Tuple[MavaTransition, Dict, Metrics, Tuple[TimeStep, Optional[HiddenStates]]]:
+    ) -> Tuple[PPOTransition, TimeStep, Dict, Metrics]:
         """Get a trajectory from the pipeline."""
         return self._queue.get(block, timeout)  # type: ignore
 

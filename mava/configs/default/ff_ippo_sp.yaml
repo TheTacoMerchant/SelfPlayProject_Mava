@@ -33,11 +33,16 @@ env:
 
 system:
   add_agent_id: False
-  num_self_play_steps: 10
+  num_self_play_steps: 50
+  steps_per_heuristic_eval: 2
 
 arch:
-  num_eval_episodes: 100
+  num_eval_episodes: 112
 
 hydra:
   searchpath:
     - file://mava/configs
+
+logger:
+  kwargs:
+    neptune_tag: [league]
