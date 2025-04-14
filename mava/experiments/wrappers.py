@@ -30,7 +30,6 @@ from jumanji import specs
 from jumanji.types import StepType, TimeStep, restart
 from jumanji.wrappers import Wrapper
 
-from mava.experiments.smax.smax_env import MetaState
 from mava.types import Observation, ObservationGlobalState, State
 from mava.experiments.smax import SMAX
 
