@@ -14,10 +14,11 @@
 
 import copy
 import time
-from typing import Any, Dict, Tuple, Callable
+from typing import Any, Dict, Tuple, Callable, NamedTuple
 import pathlib
 import datetime
 
+from flax.struct import dataclass
 import chex
 import flax
 import hydra
@@ -39,7 +40,8 @@ from mava.experiments.smax.heuristic_enemy_smax_env import (
 from mava.experiments.smax.league_smax import LeagueSMAX, LeagueManager
 from mava.experiments.smax import map_name_to_scenario
 from mava.experiments.arena import calculate_winrate_vs_heuristic
-from mava.evaluator import get_eval_fn, make_ff_eval_act_fn
+from mava.experiments.wrappers import SmaxWrapper, RecordEpisodeMetrics
+from mava.experiments.evaluator import get_eval_fn, make_ff_eval_act_fn
 from mava.experiments.smax.league_smax import LeagueState
 from mava.networks import FeedForwardActor as Actor
 from mava.networks import FeedForwardValueNet as Critic
@@ -61,22 +63,19 @@ from mava.utils.multistep import calculate_gae
 from mava.utils.network_utils import get_action_head
 from mava.utils.training import make_learning_rate
 from mava.wrappers.episode_metrics import get_final_step_metrics
-from mava.wrappers import SmaxWrapper
-from mava.wrappers.jaxmarl import batchify
-
 
 def make_envs(config, network: Actor, league_state: LeagueState):
     kwargs = dict(config.env.kwargs)
     kwargs["scenario"] = map_name_to_scenario(config.env.scenario.task_name)
 
-    train = SmaxWrapper(LeagueSMAX(network, league_state, **kwargs), False)
-    eval = SmaxWrapper(LeagueSMAX(network, league_state, **kwargs), False)
+    train = RecordEpisodeMetrics(SmaxWrapper(LeagueSMAX(network, **kwargs), False))
+    eval = RecordEpisodeMetrics(SmaxWrapper(LeagueSMAX(network, **kwargs), False))
 
-    return environments.add_extra_wrappers(train, eval, config)
+    return train, eval
 
 
 def get_learner_fn(
-    env: MarlEnv,
+    env: LeagueSMAX,
     apply_fns: Tuple[ActorApply, CriticApply],
     update_fns: Tuple[optax.TransformUpdateFn, optax.TransformUpdateFn],
     config: DictConfig,
@@ -142,6 +141,11 @@ def get_learner_fn(
         advantages, targets = calculate_gae(
             traj_batch, last_val, last_done, config.system.gamma, config.system.gae_lambda
         )
+
+        # Update winrates
+        jax.debug.print("Winrates: {}", jnp.mean(env_state.env_state.state.winrates, axis=0))
+        # wins = jnp.any(episode_metrics["episode_return"]>=1, axis=0)
+        # jax.debug.breakpoint()
 
         def _update_epoch(update_state: Tuple, _: Any) -> Tuple:
             """Update the network for a single epoch."""
@@ -343,7 +347,7 @@ def enemy_setup(key, config) -> Tuple[Actor, FrozenDict]:
 
 
 def learner_setup(
-    env: MarlEnv, key: jax.random.PRNGKey, config: DictConfig, actor_params, critic_params = None
+    env: MarlEnv, key: jax.random.PRNGKey, config: DictConfig, actor_params, critic_params = None, league_state: LeagueState = None,
 ) -> Tuple[Callable, Actor, LearnerState]:
     """Initialise learner_fn, network, optimiser, environment and states."""
     # Get available TPU cores.
@@ -401,8 +405,9 @@ def learner_setup(
     key, *env_keys = jax.random.split(
         key, n_devices * config.system.update_batch_size * config.arch.num_envs + 1
     )
-    env_states, timesteps = jax.vmap(env.reset, in_axes=(0))(
+    env_states, timesteps = jax.vmap(env.reset, in_axes=(0, None))(
         jnp.stack(env_keys),
+        league_state,
     )
     reshape_states = lambda x: x.reshape(
         (n_devices, config.system.update_batch_size, config.arch.num_envs) + x.shape[1:]
@@ -484,7 +489,7 @@ def run_league_experiment(_config: DictConfig):
         
         # Train against the league
         key, sp_key = jax.random.split(key)
-        actor_params, critic_params, t = self_play_step(sp_key,actor_network, actor_params, critic_params, logger, config, league_state, t)
+        actor_params, critic_params, league_state, t = self_play_step(sp_key,actor_network, actor_params, critic_params, logger, config, league_state, t)
 
         if sp_iter % config.system.steps_per_heuristic_eval == 0:
             print(f"{Fore.GREEN} Calculating WR vs Heuristic Enemy {sp_iter+1}/{config.system.num_self_play_steps}{Style.RESET_ALL}")
@@ -519,7 +524,7 @@ def self_play_step(key, network, actor_params, critic_params, logger: MavaLogger
 
     # Setup learner with provided parameters or initialize new ones
     learn, network, learner_state = learner_setup(
-        env, setup_key, config, actor_params, critic_params
+        env, setup_key, config, actor_params, critic_params, league_state=league_state
     )
 
     # Setup evaluator.
@@ -566,14 +571,23 @@ def self_play_step(key, network, actor_params, critic_params, logger: MavaLogger
         key, *eval_keys = jax.random.split(key, n_devices + 1)
         eval_keys = jnp.stack(eval_keys)
         eval_keys = eval_keys.reshape(n_devices, -1)
+        league_state = unreplicate_n_dims(learner_state.env_state.env_state.state, 3)
         # Evaluate.
-        eval_metrics = evaluator(trained_params, eval_keys, {})
+        eval_metrics = evaluator(
+            trained_params, 
+            eval_keys, 
+            {}, 
+            flax.jax_utils.replicate(
+                league_state, 
+                devices=jax.devices()
+            )
+        )
         logger.log(eval_metrics, t, eval_step, LogEvent.EVAL)
 
         if jnp.mean(eval_metrics["win_rate"]) > 99:
-            return (unreplicate_n_dims(learner_state.params.actor_params), unreplicate_n_dims(learner_state.params.critic_params), t)
+            return (unreplicate_n_dims(learner_state.params.actor_params), unreplicate_n_dims(learner_state.params.critic_params), league_state, t)
 
-    return (unreplicate_n_dims(learner_state.params.actor_params), unreplicate_n_dims(learner_state.params.critic_params), t)
+    return (unreplicate_n_dims(learner_state.params.actor_params), unreplicate_n_dims(learner_state.params.critic_params), league_state, t)
 
 
 @hydra.main(

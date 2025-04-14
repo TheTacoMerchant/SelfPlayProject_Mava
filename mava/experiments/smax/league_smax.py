@@ -1,21 +1,16 @@
-from typing import Dict
+from typing import Dict, Tuple, Optional
+from functools import partial
 
 from flax.struct import dataclass
 import chex
 import jax
 import jax.numpy as jnp
 
+from mava.experiments.smax.smax_env import SMAX
 from mava.experiments.utils import calculate_winrate
-from mava.experiments.smax.heuristic_enemy_smax_env import EnemySMAX
+from mava.experiments.smax.heuristic_enemy_smax_env import EnemySMAX, State
 from mava.types import Observation
-from mava.wrappers.jaxmarl import batchify
-
-
-@dataclass
-class LeagueState:
-    n_league_members: int
-    winrates: chex.Array
-    member_params: chex.Array
+from mava.experiments.wrappers import batchify, JaxMarlState
 
 def tree_stack(trees):
     return jax.tree.map(lambda *v: jnp.stack(v), *trees)
@@ -30,11 +25,24 @@ def tree_unstack(tree):
     return [treedef.unflatten(leaf) for leaf in zip(*leaves, strict=True)]
 
 
+@dataclass
+class LeagueState:
+    env_state: State
+    n_league_members: int
+    selected_opponent: int
+    selected_params: chex.Array
+    winrates: chex.Array
+    member_params: chex.Array
+
+
 class LeagueManager:
     """A league of policies for self-play training."""
 
     def reset(self, current_learner) -> LeagueState:
         return LeagueState(
+            env_state=None,
+            selected_opponent=0,
+            selected_params=None,
             n_league_members=1,
             winrates=jnp.array([0.5]),
             member_params=jax.tree.map(lambda x: jnp.expand_dims(x, 0), current_learner),
@@ -43,18 +51,74 @@ class LeagueManager:
     def add_policy(self, actor_params, old_state: LeagueState, cfg: Dict) -> LeagueState:
         """Add a new policy to the league."""
         n_league_members = old_state.n_league_members+1
-        winrates = jnp.array([calculate_winrate(actor_params, opponent, cfg) for opponent in tree_unstack(old_state.member_params)] + [0.5])
+        winrates = jnp.concat([old_state.winrates,jnp.array([0.5])])
         print(f"Winrates: {list(winrates)}")
         member_params = tree_concat([old_state.member_params, jax.tree.map(lambda x: jnp.expand_dims(x, 0),actor_params)])
 
-        return LeagueState(n_league_members=n_league_members, winrates=winrates, member_params=member_params)
+        return old_state.replace(n_league_members=n_league_members, winrates=winrates, member_params=member_params)
 
 
-class LeagueSMAX(EnemySMAX):
-    def __init__(self, network, league_state: LeagueState, **env_kwargs):
-        super().__init__(**env_kwargs)
-        self.league_state: LeagueState = league_state
+class LeagueSMAX:
+    def __init__(self, network, **env_kwargs):
+        self._env = SMAX(**env_kwargs)
+        # only one team
+        self.num_agents = self._env.num_allies
+        self.num_enemies = self._env.num_enemies
+        # want to provide a consistent API between this and SMAX
+        self.num_allies = self._env.num_allies
+        self.agents = [f"ally_{i}" for i in range(self.num_agents)]
+        self.enemy_agents = [f"enemy_{i}" for i in range(self.num_enemies)]
+        self.all_agents = self.agents + self.enemy_agents
+        self.observation_spaces = {i: self._env.observation_spaces[i] for i in self.agents}
+        self.action_spaces = {i: self._env.action_spaces[i] for i in self.agents}
         self.network= network
+
+    def __getattr__(self, name: str):
+        return getattr(self._env, name)
+
+    @partial(jax.jit, static_argnums=(0,))
+    def step(
+        self,
+        key: chex.PRNGKey,
+        state: LeagueState,
+        actions: Dict[str, chex.Array],
+        reset_state: Optional[State] = None,
+    ) -> Tuple[Dict[str, chex.Array], LeagueState, Dict[str, float], Dict[str, bool], Dict]:
+        """Performs step transitions in the environment. Resets the environment if done.
+        To control the reset state, pass `reset_state`. Otherwise, the environment will reset randomly."""
+
+        key, key_reset = jax.random.split(key)
+        obs_st, states_st, rewards, dones, infos = self.step_env(key, state, actions)
+        win = (rewards['ally_0'] >= 1)
+        updated_wr = state.winrates.at[state.selected_opponent].set(state.winrates[state.selected_opponent]*0.9 + 0.1*win)
+        # jax.debug.breakpoint()
+
+        if reset_state is None:
+            obs_re, states_re = self.reset(key_reset, state)
+        else:
+            states_re = reset_state
+            obs_re = self.get_obs(states_re)
+
+        # Auto-reset environment based on termination
+        states = jax.tree.map(
+            lambda x, y: jax.lax.select(dones["__all__"], x, y), states_re, states_st
+        )
+        obs = jax.tree.map(
+            lambda x, y: jax.lax.select(dones["__all__"], x, y), obs_re, obs_st
+        )
+        states = states.replace(winrates = jax.lax.select(dones["__all__"], updated_wr, state.winrates))
+        # jax.debug.print("Winrate: {}", states.winrates)
+        return obs, states, rewards, dones, infos
+
+    @partial(jax.jit, static_argnums=(0,))
+    def reset(self, key: chex.PRNGKey, league_state: LeagueState) -> Tuple[Dict[str, chex.Array], State]:
+        key, reset_key = jax.random.split(key)
+        obs, state = self._env.reset(reset_key)
+        league_state = self.get_enemy_policy_initial_state(key, league_state)
+        new_obs = {agent: obs[agent] for agent in self.agents}
+        new_obs["world_state"] = obs["world_state"]
+        league_state = league_state.replace(env_state=state)
+        return new_obs, league_state
 
     def _select_opponent(self, key: chex.PRNGKey, league_state: LeagueState):
         key, subkey = jax.random.split(key)
@@ -64,10 +128,12 @@ class LeagueSMAX(EnemySMAX):
 
         opp_params = jax.tree.map(lambda x: x[index], league_state.member_params)
 
-        return opp_params
+        league_state = league_state.replace(selected_opponent=index, selected_params=opp_params)
 
-    def get_enemy_policy_initial_state(self, key):
-        return self._select_opponent(key, self.league_state)
+        return league_state
+
+    def get_enemy_policy_initial_state(self, key, league_state: LeagueState):
+        return self._select_opponent(key, league_state)
 
     def get_enemy_actions(self, key, policy_state, enemy_obs, state):
         enemy_obs = Observation(
@@ -84,12 +150,66 @@ class LeagueSMAX(EnemySMAX):
         enemy_actions = {k: v.squeeze() for k, v in enemy_actions.items()}
         return enemy_actions, policy_state
         
+    @partial(jax.jit, static_argnums=(0, 4))
     def step_env(
         self,
         key: chex.PRNGKey,
-        state,
+        state: LeagueState,
         actions: Dict[str, chex.Array],
         get_state_sequence=False,
     ):
-        new_obs, state, rewards, dones, infos = super().step_env(key, state, actions, get_state_sequence)
-        return new_obs, state, rewards, dones, infos
+        jaxmarl_state = state.env_state
+        obs = self._env.get_obs(jaxmarl_state)
+        enemy_obs = self._env.get_obs_unit_list(jaxmarl_state)
+        enemy_obs = jnp.array([enemy_obs[agent] for agent in self.enemy_agents])
+        key, action_key = jax.random.split(key)
+        enemy_actions, _ = self.get_enemy_actions(
+            action_key, state.selected_params, enemy_obs, jaxmarl_state
+        )
+        enemy_actions = jnp.array([enemy_actions[i] for i in self.enemy_agents])
+        actions = jnp.array([actions[i] for i in self.agents])
+        enemy_movement_actions, enemy_attack_actions = self._env._decode_discrete_actions(
+            enemy_actions
+        )
+        if self._env.action_type == "continuous":
+            cont_actions = jnp.zeros((len(self.all_agents), 4))
+            cont_actions = cont_actions.at[: self.num_allies].set(actions)
+            key, action_key = jax.random.split(key)
+            ally_movement_actions, ally_attack_actions = self._env._decode_continuous_actions(
+                action_key, jaxmarl_state, cont_actions
+            )
+            ally_movement_actions = ally_movement_actions[: self.num_allies]
+            ally_attack_actions = ally_attack_actions[: self.num_allies]
+        else:
+            ally_movement_actions, ally_attack_actions = self._env._decode_discrete_actions(actions)
+
+        movement_actions = jnp.concatenate([ally_movement_actions, enemy_movement_actions], axis=0)
+        attack_actions = jnp.concatenate([ally_attack_actions, enemy_attack_actions], axis=0)
+
+        if not get_state_sequence:
+            obs, jaxmarl_state, rewards, dones, infos = self._env.step_env_no_decode(
+                key,
+                jaxmarl_state,
+                (movement_actions, attack_actions),
+                get_state_sequence=get_state_sequence,
+            )
+            new_obs = {agent: obs[agent] for agent in self.agents}
+            new_obs["world_state"] = obs["world_state"]
+            rewards = {agent: rewards[agent] for agent in self.agents}
+            all_done = dones["__all__"]
+            dones = {agent: dones[agent] for agent in self.agents}
+            dones["__all__"] = all_done
+
+            state = state.replace(env_state=jaxmarl_state)
+            return new_obs, state, rewards, dones, infos
+        else:
+            states = self._env.step_env_no_decode(
+                key,
+                jaxmarl_state,
+                (movement_actions, attack_actions),
+                get_state_sequence=get_state_sequence,
+            )
+            return states
+        
+    def get_avail_actions(self, state: LeagueState) -> Dict[str, chex.Array]:
+        return self._env.get_avail_actions(state.env_state)

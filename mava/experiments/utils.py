@@ -1,6 +1,6 @@
 from mava.networks import FeedForwardActor as Actor
 from mava.types import Observation
-from mava.wrappers.jaxmarl import batchify
+from mava.experiments.wrappers import batchify
 from mava.experiments.smax.smax_env import SMAX, map_name_to_scenario
 
 import hydra

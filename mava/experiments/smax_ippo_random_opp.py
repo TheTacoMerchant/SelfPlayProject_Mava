@@ -64,7 +64,7 @@ from mava.utils.network_utils import get_action_head
 from mava.utils.training import make_learning_rate
 from mava.wrappers.episode_metrics import get_final_step_metrics
 from mava.wrappers import SmaxWrapper
-from mava.wrappers.jaxmarl import batchify
+from mava.experiments.wrappers import batchify
 
 
 class EnemySMAX(MultiAgentEnv):
