@@ -21,7 +21,6 @@ from typing import TYPE_CHECKING, Any, Dict, List, Tuple, Union
 import chex
 import jax
 import jax.numpy as jnp
-from brax.envs import State as BraxState
 from chex import Array, PRNGKey
 from gymnax.environments import spaces as gymnax_spaces
 from jaxmarl.environments import spaces as jaxmarl_spaces
@@ -30,7 +29,6 @@ from jumanji import specs
 from jumanji.types import StepType, TimeStep, restart
 from jumanji.wrappers import Wrapper
 
-from mava.experiments.smax.smax_env import MetaState
 from mava.types import Observation, ObservationGlobalState, State
 from mava.experiments.smax import SMAX
 
