@@ -582,7 +582,7 @@ def self_play_step(key, network, actor_params, critic_params, logger: MavaLogger
         )
         logger.log(eval_metrics, t, eval_step, LogEvent.EVAL)
 
-        if jnp.mean(eval_metrics["win_rate"]) > 99:
+        if jnp.mean(eval_metrics["win_rate"]) > 90:
             return (unreplicate_n_dims(learner_state.params.actor_params), unreplicate_n_dims(learner_state.params.critic_params), league_state, t)
 
     return (unreplicate_n_dims(learner_state.params.actor_params), unreplicate_n_dims(learner_state.params.critic_params), league_state, t)
