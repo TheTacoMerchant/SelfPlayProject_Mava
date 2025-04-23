@@ -1,0 +1,7 @@
+use self-play reward -- BAD
+self-play improvement of heuristic-trained policy
+longer rollout_length
+league exploiters
+
+Notes:
+Winrate of model league/2025_04_18_12_35_33/11 vs Heuristic is 21.5

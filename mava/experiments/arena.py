@@ -51,21 +51,19 @@ def calculate_winrate_vs_heuristic(params, config, num_traj = 100, max_steps = N
 )
 def hydra_entry_point(cfg):
     checkpointer = orbax.checkpoint.PyTreeCheckpointer()
-    # base_dir = (pathlib.Path().parent.parent / "checkpoints").absolute()
-    base_dir = (pathlib.Path().parent.parent / "checkpoints/league").absolute()
-    # ally_str = "2025_02_28_13_43_10/4"
-    # enemy_str = "2025_02_28_13_43_10/5"
-    # ally_params = load_params_from_checkpoint(checkpointer, base_dir / ally_str)
-    # enemy_params = load_params_from_checkpoint(checkpointer, base_dir / enemy_str)
+    base_dir = (pathlib.Path().parent.parent / "checkpoints").absolute()
 
-    # wr = calculate_winrate(ally_params, enemy_params, cfg, num_traj=200)
-    # print(f"Winrate of model {ally_str} vs {enemy_str} is {wr*100}")
-
-    for i in range(15):
-        ally_str = f"2025_04_16_14_56_43/{i}"
+    for i in range(20):
+        ally_str = f"league/2025_04_18_12_35_33/{i}"
         ally_params = load_params_from_checkpoint(checkpointer, base_dir / ally_str)
         wr = calculate_winrate_vs_heuristic(ally_params, cfg, num_traj=400, max_steps=2000)
         print(f"Winrate of model {ally_str} vs Heuristic is {wr*100}")
+
+    # ally_str = f"ippo/2025_04_17_12_05_16"
+    # ally_params = load_params_from_checkpoint(checkpointer, base_dir / ally_str)
+    # ally_params = jax.tree.map(lambda x : jnp.squeeze(x), ally_params)
+    # wr = calculate_winrate_vs_heuristic(ally_params, cfg, num_traj=400, max_steps=2000)
+    # print(f"Winrate of model {ally_str} vs Heuristic is {wr*100}")
 
 if __name__ == "__main__":
     hydra_entry_point()

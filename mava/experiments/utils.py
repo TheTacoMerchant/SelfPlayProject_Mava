@@ -119,19 +119,20 @@ def calculate_winrate(ally, enemy, config, num_traj = 100):
     kwargs = dict(config.env.kwargs)
     kwargs["scenario"] = map_name_to_scenario(config.env.scenario.task_name)
 
+    # Initialize environment
+    env = SMAX(**kwargs)
+
     # Define network and optimiser.
     actor_torso = hydra.utils.instantiate(config.network.actor_network.pre_torso)
     action_head = {"_target_": "mava.networks.heads.DiscreteActionHead"}
-    actor_action_head = hydra.utils.instantiate(action_head, action_dim=10)
+    actor_action_head = hydra.utils.instantiate(action_head, action_dim=env.action_spaces["ally_0"].n)
 
-    network = Actor(torso=actor_torso, action_head=actor_action_head)
-
-    # Initialize environment
-    env = SMAX(**kwargs)
+    network = Actor(torso=actor_torso, action_head=actor_action_head)    
 
     traj = jax.vmap(simulate_traj, in_axes=[0,None,None,None,None,None])(jnp.stack(traj_keys), env, network, ally, network, enemy)
     done_idxes = jnp.argmax(traj[4]["__all__"], axis=1)
     done_idxes = jnp.where(done_idxes == 0, 200, done_idxes)
+    print(f"{done_idxes=}")
 
     won_episodes = 0
     enemy_won = 0

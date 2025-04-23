@@ -2,7 +2,6 @@ defaults:
   - logger: logger
   - arch: anakin
   - system: ppo/ff_ippo
-  - network: mlp  # [mlp, cnn]
   # - env: smax  # [cleaner, connector, vector-connector, gigastep, lbf, mabrax, matrax, rware, smax, mpe]
   - _self_
 
@@ -12,7 +11,7 @@ env:
   # 2s3z | 3s5z | 5m_vs_6m | 10m_vs_11m | 27m_vs_30m | 3s5z_vs_3s6z | 3s_vs_5z | 6h_vs_8z | smacv2_5_units | smacv2_10_units | smacv2_20_units
   scenario:
     name: LearnedPolicyEnemySMAX
-    task_name: 25m
+    task_name: 2s3z
 
   # Defines the metric that will be used to evaluate the performance of the agent.
   # This metric is returned at the end of an experiment and can be used for hyperparameter tuning.
@@ -29,15 +28,19 @@ env:
     see_enemy_actions: True # Whether to enable enemy vision. If True, the enemy will be able to see the actions of the agent.
     walls_cause_death: True # Whether to kill the agent if it collides with a wall.
     use_self_play_reward: False 
-    max_steps: 600
+    max_steps: 300
 
 system:
   add_agent_id: False
-  num_self_play_steps: 10
+  rollout_length: 256
+
+league:
   steps_per_heuristic_eval: 2
+  eval_cutoff: 55
+  num_league_steps: 100
 
 arch:
-  num_eval_episodes: 200
+  num_eval_episodes: 128
 
 hydra:
   searchpath:
@@ -46,3 +49,19 @@ hydra:
 logger:
   kwargs:
     neptune_tag: [league]
+
+network:
+  actor_network:
+    pre_torso:
+      _target_: mava.networks.torsos.MLPTorso
+      layer_sizes: [128, 128]
+      # layer_sizes: [256, 256]
+      use_layer_norm: False
+      activation: relu
+
+  critic_network:
+    pre_torso:
+      _target_: mava.networks.torsos.MLPTorso
+      layer_sizes: [128, 128]
+      use_layer_norm: False
+      activation: relu
