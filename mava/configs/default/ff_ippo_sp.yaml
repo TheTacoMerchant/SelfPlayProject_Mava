@@ -36,8 +36,9 @@ system:
 
 league:
   steps_per_heuristic_eval: 2
-  eval_cutoff: 55
+  eval_cutoff: 90
   num_league_steps: 100
+  max_members: 10
 
 arch:
   num_eval_episodes: 128

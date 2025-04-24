@@ -13,12 +13,11 @@
 # limitations under the License.
 
 import copy
-import time
-from typing import Any, Dict, Tuple, Callable, NamedTuple
-import pathlib
 import datetime
+import pathlib
+import time
+from typing import Any, Callable, Dict, Tuple
 
-from flax.struct import dataclass
 import chex
 import flax
 import hydra
@@ -26,23 +25,21 @@ import jax
 import jax.numpy as jnp
 import optax
 import orbax.checkpoint
-from flax.training import orbax_utils
 from colorama import Fore, Style
 from flax.core.frozen_dict import FrozenDict
+from flax.training import orbax_utils
 from jax import tree
 from omegaconf import DictConfig, OmegaConf
 from rich.pretty import pprint
 
-
+from mava.experiments.arena import calculate_winrate_vs_heuristic
+from mava.experiments.evaluator import get_eval_fn, make_ff_eval_act_fn
+from mava.experiments.smax import map_name_to_scenario
 from mava.experiments.smax.heuristic_enemy_smax_env import (
     HeuristicEnemySMAX,
 )
-from mava.experiments.smax.league_smax import LeagueSMAX, LeagueManager
-from mava.experiments.smax import map_name_to_scenario
-from mava.experiments.arena import calculate_winrate_vs_heuristic
-from mava.experiments.wrappers import SmaxWrapper, RecordEpisodeMetrics
-from mava.experiments.evaluator import get_eval_fn, make_ff_eval_act_fn
-from mava.experiments.smax.league_smax import LeagueState
+from mava.experiments.smax.league_smax import LeagueManager, LeagueSMAX, LeagueState
+from mava.experiments.wrappers import RecordEpisodeMetrics, SmaxWrapper
 from mava.networks import FeedForwardActor as Actor
 from mava.networks import FeedForwardValueNet as Critic
 from mava.systems.ppo.types import LearnerState, OptStates, Params, PPOTransition
@@ -51,7 +48,6 @@ from mava.types import (
     CriticApply,
     ExperimentOutput,
     LearnerFn,
-    MarlEnv,
     Metrics,
 )
 from mava.utils.checkpointing import Checkpointer
@@ -62,7 +58,8 @@ from mava.utils.network_utils import get_action_head
 from mava.utils.training import make_learning_rate
 from mava.wrappers.episode_metrics import get_final_step_metrics
 
-def make_envs(config, network: Actor, league_state: LeagueState):
+
+def make_envs(config, network: Actor):
     kwargs = dict(config.env.kwargs)
     kwargs["scenario"] = map_name_to_scenario(config.env.scenario.task_name)
 
@@ -141,9 +138,7 @@ def get_learner_fn(
         )
 
         # Update winrates
-        jax.debug.print("Winrates: {}", jnp.mean(env_state.env_state.state.winrates, axis=0))
-        # wins = jnp.any(episode_metrics["episode_return"]>=1, axis=0)
-        # jax.debug.breakpoint()
+        jax.debug.print("Winrates: {}", jnp.round(jnp.mean(env_state.env_state.state.winrates, axis=0)),2)
 
         def _update_epoch(update_state: Tuple, _: Any) -> Tuple:
             """Update the network for a single epoch."""
@@ -344,19 +339,7 @@ def enemy_setup(key, config) -> Tuple[Actor, FrozenDict]:
     return (actor_network, actor_params)
 
 
-def learner_setup(
-    env: MarlEnv, key: jax.random.PRNGKey, config: DictConfig, actor_params, critic_params = None, league_state: LeagueState = None,
-) -> Tuple[Callable, Actor, LearnerState]:
-    """Initialise learner_fn, network, optimiser, environment and states."""
-    # Get available TPU cores.
-    n_devices = len(jax.devices())
-
-    # Get number of agents.
-    config.system.num_agents = env.num_agents
-
-    # PRNG keys.
-    key, critic_net_key = jax.random.split(key)
-
+def get_optim(config):
     # Define network and optimiser.
     actor_lr = make_learning_rate(config.system.actor_lr, config)
     critic_lr = make_learning_rate(config.system.critic_lr, config)
@@ -369,6 +352,21 @@ def learner_setup(
         optax.clip_by_global_norm(config.system.max_grad_norm),
         optax.adam(critic_lr, eps=1e-5),
     )
+
+    return actor_optim, critic_optim
+
+def learner_setup(
+    env: LeagueSMAX, key: jax.random.PRNGKey, league_state: LeagueState, config: DictConfig, actor_params, critic_params = None,
+) -> Tuple[Callable, Actor, LearnerState]:
+    """Initialise learner_fn, network, optimiser, environment and states."""
+    # Get available TPU cores.
+    n_devices = len(jax.devices())
+
+    # Get number of agents.
+    config.system.num_agents = env.num_agents
+
+    # PRNG keys.
+    key, critic_net_key = jax.random.split(key)
 
     # Initialise observation with obs of all agents.
     obs = env.observation_spec.generate_value()
@@ -384,20 +382,14 @@ def learner_setup(
     if critic_params is None:
         critic_params = critic_network.init(critic_net_key, init_x)
 
+    actor_optim, critic_optim = get_optim(config)
+
     # Initialise optimiser state.
     actor_opt_state = actor_optim.init(actor_params)
     critic_opt_state = critic_optim.init(critic_params)
 
     # Pack params.
     params = Params(actor_params, critic_params)
-
-    # Pack apply and update functions.
-    apply_fns = (actor_network.apply, critic_network.apply)
-    update_fns = (actor_optim.update, critic_optim.update)
-
-    # Get batched iterated update and replicate it to pmap it over cores.
-    learn = get_learner_fn(env, apply_fns, update_fns, config)
-    learn = jax.pmap(learn, axis_name="device")
 
     # Initialise environment states and timesteps: across devices and batches.
     key, *env_keys = jax.random.split(
@@ -445,8 +437,21 @@ def learner_setup(
     params, opt_states, step_keys, dones = replicate_learner
     init_learner_state = LearnerState(params, opt_states, step_keys, env_states, timesteps, dones)
 
-    return learn, actor_network, init_learner_state
+    return (actor_network, critic_network), init_learner_state
 
+def learn_func_setup(env, networks, config):
+    actor_optim, critic_optim = get_optim(config)
+
+    # Pack apply and update functions.
+    actor_network, critic_network = networks
+    apply_fns = (actor_network.apply, critic_network.apply)
+    update_fns = (actor_optim.update, critic_optim.update)
+
+    # Get batched iterated update and replicate it to pmap it over cores.
+    learn = get_learner_fn(env, apply_fns, update_fns, config)
+    learn = jax.pmap(learn, axis_name="device")
+
+    return learn
 
 def run_league_experiment(_config: DictConfig):
     """Runs experiment."""
@@ -464,75 +469,68 @@ def run_league_experiment(_config: DictConfig):
     timestamp = datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
     save_dir = (pathlib.Path().absolute() / f"checkpoints/league/{timestamp}").absolute()
     save_dir.mkdir(exist_ok=True, parents=True)
-    
+
     # Initialize league
     league = LeagueManager()
-    
+
     key = jax.random.PRNGKey(config.system.seed)
-    
+
     # Add initial policy to league
     key, init_actor_key = jax.random.split(key)
-    actor_network, actor_params = enemy_setup(init_actor_key, config)
-    league_state = league.reset(actor_params)
+    network, actor_params = enemy_setup(init_actor_key, config)
+    league_state = league.reset(actor_params, config.league.max_members)
     critic_params = None
-    
+
     # Save initial checkpoint
     save_args = orbax_utils.save_args_from_target(actor_params)
     orbax_checkpointer.save(save_dir / "random", actor_params, save_args=save_args)
-    
+
+    key, setup_key = jax.random.split(key,2)
+
+    env, eval_env = make_envs(config, network)
+
+    # Setup learner with provided parameters or initialize new ones
+    networks, learner_state = learner_setup(
+        env, setup_key, league_state, config, actor_params, critic_params
+    )
+
+    learn = learn_func_setup(env, networks, config)
+
+    # Setup evaluator.
+    # One key per device for evaluation.
+    eval_act_fn = make_ff_eval_act_fn(networks[0].apply, config)
+    evaluator = get_eval_fn(eval_env, eval_act_fn, config, absolute_metric=False)
+
     # Self-play training loop
     t=0
     for sp_iter in range(config.league.num_league_steps):
         print(f"{Fore.GREEN}Starting self-play iteration {sp_iter+1}/{config.league.num_league_steps}{Style.RESET_ALL}")
-        
+
         # Train against the league
         key, sp_key = jax.random.split(key)
-        actor_params, critic_params, league_state, t = self_play_step(sp_key,actor_network, actor_params, critic_params, logger, config, league_state, t)
+        learner_state, league_state, t = self_play_step(sp_key,learn, learner_state, evaluator, logger, config, t)
+
+        actor_params = unreplicate_n_dims(learner_state.params.actor_params)
 
         if sp_iter % config.league.steps_per_heuristic_eval == 0:
             print(f"{Fore.GREEN} Calculating WR vs Heuristic Enemy {sp_iter+1}/{config.league.num_league_steps}{Style.RESET_ALL}")
             wr = calculate_winrate_vs_heuristic(actor_params, config)
             logger.log({"winrate_vs_heuristic": wr}, sp_iter, sp_iter/config.league.steps_per_heuristic_eval, LogEvent.ABSOLUTE)
-        
-        league_state = league.add_policy(actor_params, league_state, config)
-        
+
+        league_state = league.add_policy(actor_params, league_state)
+        key, setup_key = jax.random.split(key,2)
+        _, learner_state = learner_setup(
+            env, setup_key, league_state, config, actor_params, critic_params
+        )
+
         # Save checkpoint for this iteration
         save_args = orbax_utils.save_args_from_target(actor_params)
         orbax_checkpointer.save(save_dir / str(sp_iter), actor_params, save_args=save_args)
 
 
-def self_play_step(key, network, actor_params, critic_params, logger: MavaLogger, config, league_state, t):
-    """Train a policy against an opponent.
-    
-    Args:
-        key: Random key
-        actor_params: Parameters of the policy to train (None for fresh initialization)
-        critic_params: Parameters of the critic (None for fresh initialization)
-        logger: Logger instance
-        config: Configuration
-        league_state: State of the League
-        
-    Returns:
-        Updated actor and critic parameters
-    """
-    key, setup_key, eval_key = jax.random.split(key,3)
-    
-    env, eval_env = make_envs(config, network, league_state)
-
-
-    # Setup learner with provided parameters or initialize new ones
-    learn, network, learner_state = learner_setup(
-        env, setup_key, config, actor_params, critic_params, league_state=league_state
-    )
-
-    # Setup evaluator.
-    # One key per device for evaluation.
-    n_devices = len(jax.devices())
-    eval_keys = jax.random.split(eval_key, n_devices)
-    eval_act_fn = make_ff_eval_act_fn(network.apply, config)
-    evaluator = get_eval_fn(eval_env, eval_act_fn, config, absolute_metric=False)
-
+def self_play_step(key, learn, learner_state, evaluate, logger: MavaLogger, config, t):
     # Calculate number of updates per evaluation.
+    n_devices = len(jax.devices())
     config.system.num_updates_per_eval = config.system.num_updates // config.arch.num_evaluation
     steps_per_rollout = (
         n_devices
@@ -571,21 +569,21 @@ def self_play_step(key, network, actor_params, critic_params, logger: MavaLogger
         eval_keys = eval_keys.reshape(n_devices, -1)
         league_state = unreplicate_n_dims(learner_state.env_state.env_state.state, 3)
         # Evaluate.
-        eval_metrics = evaluator(
-            trained_params, 
-            eval_keys, 
-            {}, 
+        eval_metrics = evaluate(
+            trained_params,
+            eval_keys,
+            {},
             flax.jax_utils.replicate(
-                league_state, 
+                league_state,
                 devices=jax.devices()
             )
         )
         logger.log(eval_metrics, t, eval_step, LogEvent.EVAL)
 
         if jnp.mean(eval_metrics["win_rate"]) > config.league.eval_cutoff:
-            return (unreplicate_n_dims(learner_state.params.actor_params), unreplicate_n_dims(learner_state.params.critic_params), league_state, t)
+            return learner_state, league_state, t
 
-    return (unreplicate_n_dims(learner_state.params.actor_params), unreplicate_n_dims(learner_state.params.critic_params), league_state, t)
+    return learner_state, league_state, t
 
 
 @hydra.main(

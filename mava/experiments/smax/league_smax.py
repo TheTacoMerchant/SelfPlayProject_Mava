@@ -1,16 +1,16 @@
-from typing import Dict, Tuple, Optional
 from functools import partial
+from typing import Dict, Optional, Tuple
 
-from flax.struct import dataclass
 import chex
 import jax
 import jax.numpy as jnp
+from flax.struct import dataclass
 
+from mava.experiments.smax.heuristic_enemy_smax_env import State
 from mava.experiments.smax.smax_env import SMAX
-from mava.experiments.utils import calculate_winrate
-from mava.experiments.smax.heuristic_enemy_smax_env import EnemySMAX, State
+from mava.experiments.wrappers import batchify
 from mava.types import Observation
-from mava.experiments.wrappers import batchify, JaxMarlState
+
 
 def tree_stack(trees):
     return jax.tree.map(lambda *v: jnp.stack(v), *trees)
@@ -28,6 +28,7 @@ def tree_unstack(tree):
 @dataclass
 class LeagueState:
     env_state: State
+    max_league_members: int
     n_league_members: int
     selected_opponent: int
     selected_params: chex.Array
@@ -38,24 +39,32 @@ class LeagueState:
 class LeagueManager:
     """A league of policies for self-play training."""
 
-    def reset(self, current_learner) -> LeagueState:
+    def reset(self, current_learner, max_members) -> LeagueState:
+        broadcast = lambda x: jnp.broadcast_to(x, (max_members, *x.shape))
+
         return LeagueState(
             env_state=None,
+            max_league_members=max_members,
             selected_opponent=0,
             selected_params=None,
             n_league_members=1,
-            winrates=jnp.array([0.5]),
-            member_params=jax.tree.map(lambda x: jnp.expand_dims(x, 0), current_learner),
+            winrates=jnp.where(jnp.arange(max_members) < 1, 0.0, 1.0),
+            member_params=jax.tree.map(broadcast, current_learner),
         )
-    
-    def add_policy(self, actor_params, old_state: LeagueState, cfg: Dict) -> LeagueState:
-        """Add a new policy to the league."""
-        n_league_members = old_state.n_league_members+1
-        winrates = jnp.concat([old_state.winrates,jnp.array([0.5])])
-        print(f"Winrates: {list(winrates)}")
-        member_params = tree_concat([old_state.member_params, jax.tree.map(lambda x: jnp.expand_dims(x, 0),actor_params)])
 
-        return old_state.replace(n_league_members=n_league_members, winrates=winrates, member_params=member_params)
+    def add_policy(self, actor_params, old_state: LeagueState) -> LeagueState:
+        """Add a new policy to the league."""
+        if old_state.n_league_members < old_state.max_league_members:
+            n_league_members = old_state.n_league_members+1
+            member_params = jax.tree.map(lambda x,y : x.at[n_league_members-1].set(y), old_state.member_params, actor_params)
+        else:
+            n_league_members = old_state.max_league_members
+            weakest_idx = jnp.argmax(old_state.winrates)
+            member_params = jax.tree.map(lambda x,y : x.at[weakest_idx].set(y), old_state.member_params, actor_params)
+
+        return old_state.replace(n_league_members=n_league_members,
+                                 winrates=jnp.where(jnp.arange(old_state.max_league_members) < n_league_members, 0.0, 1.0),
+                                 member_params=member_params)
 
 
 class LeagueSMAX:
@@ -90,8 +99,8 @@ class LeagueSMAX:
         key, key_reset = jax.random.split(key)
         obs_st, states_st, rewards, dones, infos = self.step_env(key, state, actions)
         win = (rewards['ally_0'] >= 1)
+
         updated_wr = state.winrates.at[state.selected_opponent].set(state.winrates[state.selected_opponent]*0.9 + 0.1*win)
-        # jax.debug.breakpoint()
 
         if reset_state is None:
             obs_re, states_re = self.reset(key_reset, state)
@@ -107,7 +116,6 @@ class LeagueSMAX:
             lambda x, y: jax.lax.select(dones["__all__"], x, y), obs_re, obs_st
         )
         states = states.replace(winrates = jax.lax.select(dones["__all__"], updated_wr, state.winrates))
-        # jax.debug.print("Winrate: {}", states.winrates)
         return obs, states, rewards, dones, infos
 
     @partial(jax.jit, static_argnums=(0,))
@@ -140,7 +148,6 @@ class LeagueSMAX:
             agents_view=enemy_obs,
             action_mask=batchify(self._env.get_avail_actions(state), self.enemy_agents),
         )
-        # jax.debug.print("Sample of policy params: {x}", x=policy_state['params']['torso']['Dense_0']['kernel'][0][:10])
         pi = self.network.apply(policy_state, enemy_obs)
         enemy_actions = pi.sample(seed=key)
         enemy_actions = {
@@ -149,7 +156,7 @@ class LeagueSMAX:
         }
         enemy_actions = {k: v.squeeze() for k, v in enemy_actions.items()}
         return enemy_actions, policy_state
-        
+
     @partial(jax.jit, static_argnums=(0, 4))
     def step_env(
         self,
@@ -210,6 +217,6 @@ class LeagueSMAX:
                 get_state_sequence=get_state_sequence,
             )
             return states
-        
+
     def get_avail_actions(self, state: LeagueState) -> Dict[str, chex.Array]:
         return self._env.get_avail_actions(state.env_state)
