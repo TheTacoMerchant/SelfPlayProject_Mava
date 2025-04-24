@@ -138,7 +138,7 @@ def get_learner_fn(
         )
 
         # Update winrates
-        jax.debug.print("Winrates: {}", jnp.round(jnp.mean(env_state.env_state.state.winrates, axis=0)),2)
+        jax.debug.print("Winrates: {}", jnp.round(jnp.mean(env_state.env_state.state.winrates, axis=0),2))
 
         def _update_epoch(update_state: Tuple, _: Any) -> Tuple:
             """Update the network for a single epoch."""
