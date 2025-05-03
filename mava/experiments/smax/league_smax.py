@@ -98,7 +98,7 @@ class LeagueSMAX:
 
         key, key_reset = jax.random.split(key)
         obs_st, states_st, rewards, dones, infos = self.step_env(key, state, actions)
-        win = (rewards['ally_0'] >= 1)
+        win = (rewards['ally_0'] >= 1.0)
 
         updated_wr = state.winrates.at[state.selected_opponent].set(state.winrates[state.selected_opponent]*0.9 + 0.1*win)
 

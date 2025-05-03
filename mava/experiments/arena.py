@@ -1,6 +1,8 @@
 import pickle
 import pathlib
+import json
 
+import matplotlib.pyplot as plt
 import hydra
 import orbax.checkpoint
 import jax
@@ -52,12 +54,31 @@ def calculate_winrate_vs_heuristic(params, config, num_traj = 100, max_steps = N
 def hydra_entry_point(cfg):
     checkpointer = orbax.checkpoint.PyTreeCheckpointer()
     base_dir = (pathlib.Path().parent.parent / "checkpoints").absolute()
+    date_str = "2025_04_24_12_14_16"
 
-    for i in range(20):
-        ally_str = f"league/2025_04_18_12_35_33/{i}"
-        ally_params = load_params_from_checkpoint(checkpointer, base_dir / ally_str)
-        wr = calculate_winrate_vs_heuristic(ally_params, cfg, num_traj=400, max_steps=2000)
-        print(f"Winrate of model {ally_str} vs Heuristic is {wr*100}")
+    out_dir = (base_dir.parent / "arena_outputs")
+    if not (out_dir / date_str).exists():
+        wrs = []
+        for i in range(50):
+            ally_str = f"league/{date_str}/{i}"
+            ally_params = load_params_from_checkpoint(checkpointer, base_dir / ally_str)
+            wr = calculate_winrate_vs_heuristic(ally_params, cfg, num_traj=400, max_steps=200)
+            print(f"Winrate of model {ally_str} vs Heuristic is {wr*100}")
+            wrs.append(wr)
+
+        (out_dir/date_str).mkdir(exist_ok=True)
+        with open(out_dir/date_str/"wr.json", "w") as f:
+            json.dump({"winrates": wrs}, f)
+    else:
+        with open(out_dir/date_str/"wr.json", "r") as f:
+            wrs = json.load(f)["winrates"]
+
+    plt.plot(wrs)
+    plt.xlabel("Iterations")
+    plt.ylabel("Win-rate")
+    plt.show()
+    plt.savefig(out_dir/date_str/"wr_plot.pdf", transparent=True, format="pdf")
+    
 
     # ally_str = f"ippo/2025_04_17_12_05_16"
     # ally_params = load_params_from_checkpoint(checkpointer, base_dir / ally_str)

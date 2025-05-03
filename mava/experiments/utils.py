@@ -53,7 +53,7 @@ def simulate_traj(key, env: SMAX, ally_net, ally_params, enemy_net, enemy_params
 
         return ((new_state, key), (step_key, state, actions, rewards, dones, infos))
 
-    _, traj = jax.lax.scan(_step, (state, key), None, length=200)
+    _, traj = jax.lax.scan(_step, (state, key), None, length=env.max_steps)
 
     return traj
 
@@ -77,7 +77,7 @@ def calculate_winrate(ally, enemy, config, num_traj = 100):
 
     traj = jax.vmap(simulate_traj, in_axes=[0,None,None,None,None,None])(jnp.stack(traj_keys), env, network, ally, network, enemy)
     done_idxes = jnp.argmax(traj[4]["__all__"], axis=1)
-    done_idxes = jnp.where(done_idxes == 0, 200, done_idxes)
+    done_idxes = jnp.where(done_idxes == 0, env.max_steps, done_idxes)
     print(f"{done_idxes=}")
 
     won_episodes = 0

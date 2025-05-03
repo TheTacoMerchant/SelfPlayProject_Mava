@@ -176,6 +176,7 @@ def visualize_episode(env: SMAX, traj, output_dir: pathlib.Path, filename:str, f
     exp_state_seq = env.expand_state_seq(state_seq)
 
     steps_per_frame = 4
+    print(f"Total Frames: {len(exp_state_seq) // steps_per_frame}")
     with tempfile.TemporaryDirectory() as tmpdir:
         for frame, step in enumerate(range(0, len(exp_state_seq), steps_per_frame)):
             # Clear any previous plots to avoid memory issues
@@ -230,7 +231,7 @@ def viz_specific(ally_params, enemy_params, config, filename, max_search=100, al
     # Define network and optimiser.
     actor_torso = hydra.utils.instantiate(config.network.actor_network.pre_torso)
     action_head = {"_target_": "mava.networks.heads.DiscreteActionHead"}
-    actor_action_head = hydra.utils.instantiate(action_head, action_dim=10)
+    actor_action_head = hydra.utils.instantiate(action_head, action_dim=env.action_spaces["ally_0"].n)
 
     network = Actor(torso=actor_torso, action_head=actor_action_head)
 
@@ -251,19 +252,46 @@ def viz_specific(ally_params, enemy_params, config, filename, max_search=100, al
             visualize_episode(env, traj[:3], filename)
             break
 
-def viz_specific_vs_heuristic(ally_params, config, filename, max_search=100, ally_won_cond=False, output_dir = pathlib.Path("viz_out")):
+def viz_tie(ally_params, enemy_params, config, filename, max_search=100, output_dir = pathlib.Path("viz_out")):
     kwargs = dict(config.env.kwargs)
     kwargs["scenario"] = map_name_to_scenario(config.env.scenario.task_name)
+
+    # Initialize environment
+    env = SMAX(**kwargs)
 
     # Define network and optimiser.
     actor_torso = hydra.utils.instantiate(config.network.actor_network.pre_torso)
     action_head = {"_target_": "mava.networks.heads.DiscreteActionHead"}
-    actor_action_head = hydra.utils.instantiate(action_head, action_dim=10)
+    actor_action_head = hydra.utils.instantiate(action_head, action_dim=env.action_spaces["ally_0"].n)
 
     network = Actor(torso=actor_torso, action_head=actor_action_head)
 
+    key = jax.random.PRNGKey(2025)
+    for i in range(max_search):
+        key, traj_key = jax.random.split(key)
+
+        traj = simulate_traj(traj_key, env, network, ally_params, network, enemy_params)
+        done_idx = jnp.argmax(traj[4]["__all__"])
+        done_idx = jnp.where(done_idx == 0, 200, done_idx).item()
+
+        if done_idx == 200:
+            traj= jax.tree.map(lambda x : x[:done_idx+1], traj)
+            visualize_episode(env, traj[:3], output_dir, filename, fps=10)
+            break
+
+def viz_specific_vs_heuristic(ally_params, config, filename, max_search=100, ally_won_cond=False, output_dir = pathlib.Path("viz_out")):
+    kwargs = dict(config.env.kwargs)
+    kwargs["scenario"] = map_name_to_scenario(config.env.scenario.task_name)
+
     # Initialize environment
     env = HeuristicEnemySMAX(**kwargs)
+
+    # Define network and optimiser.
+    actor_torso = hydra.utils.instantiate(config.network.actor_network.pre_torso)
+    action_head = {"_target_": "mava.networks.heads.DiscreteActionHead"}
+    actor_action_head = hydra.utils.instantiate(action_head, action_dim=env.action_spaces["ally_0"].n)
+
+    network = Actor(torso=actor_torso, action_head=actor_action_head)
 
     key = jax.random.PRNGKey(2025)
     for i in range(max_search):
@@ -311,12 +339,13 @@ def viz_random(ally_model_path, enemy_model_path, config_path, filename="random.
 def hydra_entry_point(cfg):
     checkpointer = orbax.checkpoint.PyTreeCheckpointer()
     base_dir = (pathlib.Path().parent.parent / "checkpoints/league").absolute()
-    ally_params = load_params_from_checkpoint(checkpointer, base_dir / "2025_02_28_13_43_10/4")
-    enemy_params = load_params_from_checkpoint(checkpointer, base_dir / "2025_02_28_13_43_10/5")
+    ally_params = load_params_from_checkpoint(checkpointer, base_dir / "2025_04_24_12_14_16/5")
+    enemy_params = load_params_from_checkpoint(checkpointer, base_dir / "2025_04_24_12_14_16/39")
 
     # viz_specific(ally_params, enemy_params, cfg, "trained_sp_1_a9_e8.mp4", ally_won_cond=False)
-    viz_specific_vs_heuristic(ally_params, cfg, "trained_sp_02_28_a4_heuristic_win.mp4", ally_won_cond=True)
-    viz_specific_vs_heuristic(ally_params, cfg, "trained_sp_02_28_a4_heuristic_loss.mp4", ally_won_cond=False)
+    # viz_specific_vs_heuristic(ally_params, cfg, "league_04_24_a5_all_from_scratch_heuristic_win.mp4", ally_won_cond=True)
+    # viz_specific_vs_heuristic(ally_params, cfg, "league_04_24_a5_all_from_scratch_heuristic_loss.mp4", ally_won_cond=False)
+    viz_tie(ally_params, enemy_params, cfg, "trained_sp_1_a9_e8.mp4")
     print('done!')
 
 if __name__ == "__main__":
