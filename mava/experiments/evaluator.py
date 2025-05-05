@@ -79,6 +79,72 @@ def get_num_eval_envs(config: DictConfig, absolute_metric: bool) -> int:
         return config.arch.num_envs  # type: ignore
 
 
+def get_league_eval_fn(env, act_fn, config):
+    eval_episodes = config.arch.num_eval_episodes
+
+    def eval_fn(ally_params: FrozenDict, enemy_params, key: PRNGKey, env_state) -> Metrics:
+        """Evaluates the given params on an environment and returns relevent metrics.
+
+        Metrics are collected by the `RecordEpisodeMetrics` wrapper: episode return and length,
+        also win rate for environments that support it.
+
+        Returns: Dict[str, Array] - dictionary of metric name to metric values for each episode.
+        """
+
+        def _env_step(eval_state: _EvalEnvStepState) -> Tuple[_EvalEnvStepState, TimeStep]:
+            """Performs a single environment step"""
+            env_state, ts, key = eval_state
+
+            key, act_key = jax.random.split(key)
+            ally_action = act_fn(ally_params, ts, act_key)
+            enemy_action
+            env_state, ts = jax.vmap(env.step)(env_state, ally_action, enemy_action)
+
+            return (env_state, ts, key, actor_state), ts
+
+        def _episode(key: PRNGKey, _: Any, env_state=env_state) -> Tuple[PRNGKey, Metrics]:
+            """Simulates `num_envs` episodes."""
+            key, reset_key = jax.random.split(key)
+            reset_keys = jax.random.split(reset_key, n_vmapped_envs)
+            env_state, ts = jax.vmap(env.reset, in_axes=(0, None))(reset_keys, env_state)
+
+            step_state = env_state, ts, key
+            _, timesteps = jax.lax.scan(_env_step, step_state, length = env.time_limit)
+
+            metrics = timesteps.extras["episode_metrics"]
+            if config.env.log_win_rate:
+                metrics["won_episode"] = timesteps.extras["won_episode"]
+
+            # find the first instance of done to get the metrics at that timestep, we don't
+            # care about subsequent steps because we only the results from the first episode
+            done_idx = jnp.argmax(timesteps.last(), axis=0)
+            metrics = tree.map(lambda m: m[done_idx, jnp.arange(n_vmapped_envs)], metrics)
+            del metrics["is_terminal_step"]  # uneeded for logging
+
+            return key, metrics
+
+        # This loop is important because we don't want too many parallel envs.
+        # So in evaluation we have num_envs parallel envs and loop enough times
+        # so that we do at least `eval_episodes` number of episodes.
+        _, metrics = jax.lax.scan(_episode, key, length=eval_episodes)
+        metrics = tree.map(lambda x: x.reshape(-1), metrics)  # flatten metrics
+        return metrics
+
+    def timed_eval_fn(params: FrozenDict, key: PRNGKey, init_act_state: ActorState, env_state) -> Metrics:
+        """Wrapper around eval function to time it and add in steps per second metric."""
+        start_time = time.time()
+
+        metrics = jax.pmap(eval_fn)(params, key, init_act_state, env_state)
+        metrics = jax.block_until_ready(metrics)
+
+        end_time = time.time()
+        total_timesteps = jnp.sum(metrics["episode_length"])
+        metrics["steps_per_second"] = total_timesteps / (end_time - start_time)
+        return metrics
+
+    return timed_eval_fn
+
+
 def get_eval_fn(
     env: MarlEnv, act_fn: EvalActFn, config: DictConfig, absolute_metric: bool
 ) -> EvalFn:
@@ -123,13 +189,13 @@ def get_eval_fn(
 
         def _env_step(eval_state: _EvalEnvStepState, _: Any) -> Tuple[_EvalEnvStepState, TimeStep]:
             """Performs a single environment step"""
-            env_state, ts, key, actor_state = eval_state
+            env_state, ts, key = eval_state
 
             key, act_key = jax.random.split(key)
-            action, actor_state = act_fn(params, ts, act_key, actor_state)
+            action = act_fn(params, ts, act_key)
             env_state, ts = jax.vmap(env.step)(env_state, action)
 
-            return (env_state, ts, key, actor_state), ts
+            return (env_state, ts, key), ts
 
         def _episode(key: PRNGKey, _: Any, env_state=env_state) -> Tuple[PRNGKey, Metrics]:
             """Simulates `num_envs` episodes."""
@@ -137,7 +203,7 @@ def get_eval_fn(
             reset_keys = jax.random.split(reset_key, n_vmapped_envs)
             env_state, ts = jax.vmap(env.reset, in_axes=(0, None))(reset_keys, env_state)
 
-            step_state = env_state, ts, key, init_act_state
+            step_state = env_state, ts, key
             _, timesteps = jax.lax.scan(_env_step, step_state, jnp.arange(env.time_limit + 1))
 
             metrics = timesteps.extras["episode_metrics"]
@@ -179,11 +245,11 @@ def make_ff_eval_act_fn(actor_apply_fn: ActorApply, config: DictConfig) -> EvalA
     feed forward mava actor network."""
 
     def eval_act_fn(
-        params: FrozenDict, timestep: TimeStep, key: PRNGKey, actor_state: ActorState
+        params: FrozenDict, timestep: TimeStep, key: PRNGKey
     ) -> Tuple[Action, Dict]:
         pi = actor_apply_fn(params, timestep.observation)
         action = pi.mode() if config.arch.evaluation_greedy else pi.sample(seed=key)
-        return action, {}
+        return action
 
     return eval_act_fn
 

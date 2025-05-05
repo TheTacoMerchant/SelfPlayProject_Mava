@@ -580,7 +580,7 @@ def self_play_step(key, learn, learner_state, evaluate, logger: MavaLogger, conf
         )
         logger.log(eval_metrics, t, eval_step, LogEvent.EVAL)
 
-        if jnp.mean(eval_metrics["win_rate"]) > config.league.eval_cutoff:
+        if jnp.mean(eval_metrics["win_rate"]) >= config.league.eval_cutoff:
             return learner_state, league_state, t
 
     return learner_state, league_state, t
