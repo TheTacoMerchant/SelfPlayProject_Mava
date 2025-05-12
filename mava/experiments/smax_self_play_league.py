@@ -33,13 +33,13 @@ from omegaconf import DictConfig, OmegaConf
 from rich.pretty import pprint
 
 from mava.experiments.arena import calculate_winrate_vs_heuristic
-from mava.experiments.evaluator import get_eval_fn, make_ff_eval_act_fn
+from mava.experiments.evaluator import get_eval_fn, make_ff_eval_act_fn, get_league_eval_fn
 from mava.experiments.smax import map_name_to_scenario
 from mava.experiments.smax.heuristic_enemy_smax_env import (
     HeuristicEnemySMAX,
 )
-from mava.experiments.smax.league_smax import LeagueManager, LeagueSMAX, LeagueState
-from mava.experiments.wrappers import RecordEpisodeMetrics, SmaxWrapper
+from mava.experiments.smax.league_smax import LeagueManager, LeagueSMAX, LeagueState, SMAX
+from mava.experiments.wrappers import RecordEpisodeMetrics, SmaxWrapper, EvalRecordEpisodeMetrics
 from mava.networks import FeedForwardActor as Actor
 from mava.networks import FeedForwardValueNet as Critic
 from mava.systems.ppo.types import LearnerState, OptStates, Params, PPOTransition
@@ -64,7 +64,7 @@ def make_envs(config, network: Actor):
     kwargs["scenario"] = map_name_to_scenario(config.env.scenario.task_name)
 
     train = RecordEpisodeMetrics(SmaxWrapper(LeagueSMAX(network, **kwargs), False))
-    eval = RecordEpisodeMetrics(SmaxWrapper(LeagueSMAX(network, **kwargs), False))
+    eval = EvalRecordEpisodeMetrics(SmaxWrapper(SMAX(**kwargs), False))
 
     return train, eval
 
@@ -478,7 +478,7 @@ def run_league_experiment(_config: DictConfig):
     # Add initial policy to league
     key, init_actor_key = jax.random.split(key)
     network, actor_params = enemy_setup(init_actor_key, config)
-    league_state = league.reset(actor_params, config.league.max_members)
+    league_state = league.reset(actor_params, config.league.num_league_steps)
     critic_params = None
 
     # Save initial checkpoint
@@ -498,8 +498,9 @@ def run_league_experiment(_config: DictConfig):
 
     # Setup evaluator.
     # One key per device for evaluation.
-    eval_act_fn = make_ff_eval_act_fn(networks[0].apply, config)
-    evaluator = get_eval_fn(eval_env, eval_act_fn, config, absolute_metric=False)
+    # eval_act_fn = make_ff_eval_act_fn(networks[0].apply, config)
+    # evaluator = get_eval_fn(eval_env, eval_act_fn, config, absolute_metric=False)
+    evaluator = get_league_eval_fn(eval_env, networks[0].apply, config)
 
     # Self-play training loop
     t=0
@@ -563,26 +564,25 @@ def self_play_step(key, learn, learner_state, evaluate, logger: MavaLogger, conf
         learner_state = learner_output.learner_state
 
         # Prepare for evaluation.
-        trained_params = unreplicate_batch_dim(learner_state.params.actor_params)
-        key, *eval_keys = jax.random.split(key, n_devices + 1)
-        eval_keys = jnp.stack(eval_keys)
-        eval_keys = eval_keys.reshape(n_devices, -1)
+        # trained_params = unreplicate_n_dims(learner_state.params.actor_params, 2)
+        # key, eval_key = jax.random.split(key, n_devices + 1)
+        # eval_keys = jnp.stack(eval_keys)
+        # eval_keys = eval_keys.reshape(n_devices, -1) Uncomment if we go back to pmap eval
         league_state = unreplicate_n_dims(learner_state.env_state.env_state.state, 3)
         # Evaluate.
-        eval_metrics = evaluate(
-            trained_params,
-            eval_keys,
-            {},
-            flax.jax_utils.replicate(
-                league_state,
-                devices=jax.devices()
-            )
-        )
-        logger.log(eval_metrics, t, eval_step, LogEvent.EVAL)
+        # eval_metrics = evaluate(
+        #     trained_params,
+        #     jax.tree.map(lambda x: x[:league_state.n_league_members],league_state.member_params),
+        #     eval_key,
+        # )
+        # logger.log(eval_metrics, t, eval_step, LogEvent.EVAL)
 
-        if jnp.mean(eval_metrics["win_rate"]) >= config.league.eval_cutoff:
+        logger.log({"lowest winrate": jnp.min(100* league_state.winrates)}, t, eval_step, LogEvent.TRAIN)
+
+        if jnp.min(100* league_state.winrates) >= config.league.eval_cutoff:
             return learner_state, league_state, t
 
+    print("Failed to reach cutoff before timeout.")
     return learner_state, league_state, t
 
 

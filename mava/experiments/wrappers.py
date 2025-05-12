@@ -340,7 +340,7 @@ class SmaxWrapper(JaxMarlWrapper):
         self._env: SMAX
 
     def reset(
-        self, key: PRNGKey, state
+        self, key: PRNGKey, state=None
     ) -> Tuple[JaxMarlState, TimeStep[Union[Observation, ObservationGlobalState]]]:
         state, ts = super().reset(key, state)
         extras = {"won_episode": False}
@@ -352,7 +352,7 @@ class SmaxWrapper(JaxMarlWrapper):
     ) -> Tuple[JaxMarlState, TimeStep[Union[Observation, ObservationGlobalState]]]:
         state, ts = super().step(state, action)
 
-        current_winner = (ts.step_type == StepType.LAST) & jnp.all(ts.reward >= 1.0)
+        current_winner = (ts.step_type == StepType.LAST) & (ts.reward[0] >= 1.0)
         extras = {"won_episode": current_winner}
         ts = ts.replace(extras=extras)
         return state, ts
@@ -404,7 +404,7 @@ class RecordEpisodeMetrics(Wrapper):
         self.time_limit = self._env.time_limit
         self.action_dim = self._env.action_dim
 
-    def reset(self, key: chex.PRNGKey, state) -> Tuple[RecordEpisodeMetricsState, TimeStep]:
+    def reset(self, key: chex.PRNGKey, state=None) -> Tuple[RecordEpisodeMetricsState, TimeStep]:
         """Reset the environment."""
         key, reset_key = jax.random.split(key)
         state, timestep = self._env.reset(reset_key, state)
@@ -436,6 +436,73 @@ class RecordEpisodeMetrics(Wrapper):
 
         # Counting episode return and length.
         new_episode_return = state.running_count_episode_return + jnp.mean(timestep.reward)
+        new_episode_length = state.running_count_episode_length + 1
+
+        # Previous episode return/length until done and then the next episode return.
+        episode_return_info = state.episode_return * not_done + new_episode_return * done
+        episode_length_info = state.episode_length * not_done + new_episode_length * done
+
+        timestep.extras["episode_metrics"] = {
+            "episode_return": episode_return_info,
+            "episode_length": episode_length_info,
+            "is_terminal_step": done,
+        }
+
+        state = RecordEpisodeMetricsState(
+            env_state=env_state,
+            key=state.key,
+            running_count_episode_return=new_episode_return * not_done,
+            running_count_episode_length=new_episode_length * not_done,
+            episode_return=episode_return_info,
+            episode_length=episode_length_info,
+        )
+        return state, timestep
+    
+class EvalRecordEpisodeMetrics(Wrapper):
+    """Record the episode returns and lengths."""
+
+    # This init isn't really needed as jumanji.Wrapper will forward the attributes,
+    # but mypy doesn't realize this.
+    def __init__(self, env):
+        super().__init__(env)
+        self._env
+
+        self.num_agents = self._env.num_agents
+        self.time_limit = self._env.time_limit
+        self.action_dim = self._env.action_dim
+
+    def reset(self, key: chex.PRNGKey, state=None) -> Tuple[RecordEpisodeMetricsState, TimeStep]:
+        """Reset the environment."""
+        key, reset_key = jax.random.split(key)
+        state, timestep = self._env.reset(reset_key, state)
+        state = RecordEpisodeMetricsState(
+            state,
+            key,
+            jnp.array(0.0, dtype=float),
+            jnp.array(0, dtype=int),
+            jnp.array(0.0, dtype=float),
+            jnp.array(0, dtype=int),
+        )
+        timestep.extras["episode_metrics"] = {
+            "episode_return": jnp.array(0.0, dtype=float),
+            "episode_length": jnp.array(0, dtype=int),
+            "is_terminal_step": jnp.array(False, dtype=bool),
+        }
+        return state, timestep
+
+    def step(
+        self,
+        state: RecordEpisodeMetricsState,
+        action: chex.Array,
+    ) -> Tuple[RecordEpisodeMetricsState, TimeStep]:
+        """Step the environment."""
+        env_state, timestep = self._env.step(state.env_state, action)
+
+        done = timestep.last()
+        not_done = 1 - done
+
+        # Counting episode return and length.
+        new_episode_return = state.running_count_episode_return + timestep.reward[0]
         new_episode_length = state.running_count_episode_length + 1
 
         # Previous episode return/length until done and then the next episode return.

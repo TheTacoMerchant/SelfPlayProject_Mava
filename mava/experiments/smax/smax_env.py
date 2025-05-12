@@ -259,7 +259,7 @@ class SMAX(MultiAgentEnv):
             raise ValueError("Provided observation type is not valid")
 
     @partial(jax.jit, static_argnums=(0,))
-    def reset(self, key: chex.PRNGKey) -> Tuple[Dict[str, chex.Array], State]:
+    def reset(self, key: chex.PRNGKey, *args) -> Tuple[Dict[str, chex.Array], State]:
         """Environment-specific reset."""
         key, team_0_key, team_1_key, swap_key = jax.random.split(key, 4)
 

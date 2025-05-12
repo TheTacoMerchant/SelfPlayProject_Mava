@@ -82,6 +82,8 @@ class LeagueSMAX:
         self.action_spaces = {i: self._env.action_spaces[i] for i in self.agents}
         self.network= network
 
+        self.pfsp_factor = env_kwargs.get("pfsp_factor", 1)
+
     def __getattr__(self, name: str):
         return getattr(self._env, name)
 
@@ -128,10 +130,10 @@ class LeagueSMAX:
         league_state = league_state.replace(env_state=state)
         return new_obs, league_state
 
-    def _select_opponent(self, key: chex.PRNGKey, league_state: LeagueState):
+    def _select_opponent(self, key: chex.PRNGKey, league_state: LeagueState) -> LeagueState:
         key, subkey = jax.random.split(key)
         # index = jax.random.randint(subkey, shape=(), minval=0, maxval=league_state.n_league_members)
-        probs = (1-league_state.winrates)**2/jnp.sum((1-league_state.winrates)**2)
+        probs = (1-league_state.winrates)**self.pfsp_factor/jnp.sum((1-league_state.winrates)**self.pfsp_factor)
         index = jax.random.categorical(subkey, logits=jnp.log(probs))
 
         opp_params = jax.tree.map(lambda x: x[index], league_state.member_params)
