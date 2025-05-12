@@ -28,7 +28,7 @@ env:
     see_enemy_actions: True # Whether to enable enemy vision. If True, the enemy will be able to see the actions of the agent.
     walls_cause_death: True # Whether to kill the agent if it collides with a wall.
     use_self_play_reward: False 
-    max_steps: 300
+    max_steps: 200
 
 system:
   num_updates: 1220
@@ -36,19 +36,18 @@ system:
   max_grad_norm: 10
   clip_eps: 0.05
   add_agent_id: False
-  rollout_length: 256
+  rollout_length: 128
   actor_lr: 0.0001
   critic_lr: 0.0001
 
 league:
   steps_per_heuristic_eval: 1
-  eval_cutoff: 100
-  num_league_steps: 10
-  max_members: 10
+  eval_cutoff: 90
+  num_league_steps: 20
 
 arch:
-  num_eval_episodes: 128
-  num_envs: 64
+  num_eval_episodes: 100
+  num_envs: 16
 
 hydra:
   searchpath:
@@ -57,6 +56,7 @@ hydra:
 logger:
   kwargs:
     neptune_tag: [league]
+  use_neptune: True
 
 network:
   actor_network:

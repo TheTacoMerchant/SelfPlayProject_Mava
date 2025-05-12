@@ -1,5 +1,6 @@
 from functools import partial
 from typing import Dict, Optional, Tuple
+from math import floor
 
 import chex
 import jax
@@ -30,21 +31,43 @@ class LeagueState:
     env_state: State
     max_league_members: int
     n_league_members: int
+    current_step:int
+
+    last_main_idx:int
+    last_me_idx:int
+    last_le_idx:int
+
     selected_opponent: int
     selected_params: chex.Array
     winrates: chex.Array
-    member_params: chex.Array
+    member_params: chex.ArrayTree
 
 
 class LeagueManager:
-    """A league of policies for self-play training."""
+    """
+    A league of policies for self-play training.
+    LS:
+    0 - Main Agent
+    1 - Main Exploiter
+    2 - League Exploiter
+    """
+    def __init__(self, total_agents:int, pattern: list):
+        n_reps = floor((total_agents-1) / len(pattern))
+        rem = total_agents - len(pattern) * n_reps
 
-    def reset(self, current_learner, max_members) -> LeagueState:
+        ls = pattern * n_reps + [0]*rem
+        self.learner_schedule = jnp.array(ls)
+
+    def reset(self, current_learner, max_members, num_exploiters=None) -> LeagueState:
         broadcast = lambda x: jnp.broadcast_to(x, (max_members, *x.shape))
 
         return LeagueState(
             env_state=None,
             max_league_members=max_members,
+            current_step=0,
+            last_main_idx=0,
+            last_me_idx=0,
+            last_le_idx=0,
             selected_opponent=0,
             selected_params=None,
             n_league_members=1,
@@ -57,14 +80,32 @@ class LeagueManager:
         if old_state.n_league_members < old_state.max_league_members:
             n_league_members = old_state.n_league_members+1
             member_params = jax.tree.map(lambda x,y : x.at[n_league_members-1].set(y), old_state.member_params, actor_params)
+            last_idx = n_league_members-1
         else:
             n_league_members = old_state.max_league_members
             weakest_idx = jnp.argmax(old_state.winrates)
             member_params = jax.tree.map(lambda x,y : x.at[weakest_idx].set(y), old_state.member_params, actor_params)
+            last_idx = weakest_idx
+
+        last_main_idx = jnp.where(self.learner_schedule[old_state.current_step] == 0, last_idx, old_state.last_main_idx)
+
+        main_mask = jnp.where(jnp.arange(old_state.max_league_members) < n_league_members, 0.0, 1.0)
+        me_mask = jnp.where(jnp.arange(old_state.max_league_members) == last_main_idx, 0.0, 1.0)
+
+        mask = jnp.where(self.learner_schedule[old_state.current_step+1] == 1, me_mask, main_mask)
 
         return old_state.replace(n_league_members=n_league_members,
-                                 winrates=jnp.where(jnp.arange(old_state.max_league_members) < n_league_members, 0.0, 1.0),
+                                 winrates=mask,
+                                 last_main_idx=last_main_idx,
+                                 current_step=old_state.current_step+1,
                                  member_params=member_params)
+
+    def get_init_params(self, state: LeagueState) -> Optional[Dict]:
+        last_me_params = jax.tree.map(lambda x: x[state.last_main_idx], state.member_params)
+        if self.learner_schedule[state.current_step] == 0:
+            return last_me_params
+        else:
+            return None # For now, we always reset exploiters
 
 
 class LeagueSMAX:

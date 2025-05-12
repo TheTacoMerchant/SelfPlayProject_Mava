@@ -356,7 +356,7 @@ def get_optim(config):
     return actor_optim, critic_optim
 
 def learner_setup(
-    env: LeagueSMAX, key: jax.random.PRNGKey, league_state: LeagueState, config: DictConfig, actor_params, critic_params = None,
+    env: LeagueSMAX, key: jax.random.PRNGKey, league_state: LeagueState, config: DictConfig, actor_params = None, critic_params = None,
 ) -> Tuple[Callable, Actor, LearnerState]:
     """Initialise learner_fn, network, optimiser, environment and states."""
     # Get available TPU cores.
@@ -366,7 +366,7 @@ def learner_setup(
     config.system.num_agents = env.num_agents
 
     # PRNG keys.
-    key, critic_net_key = jax.random.split(key)
+    key, critic_net_key, actor_net_key = jax.random.split(key, 3)
 
     # Initialise observation with obs of all agents.
     obs = env.observation_spec.generate_value()
@@ -376,6 +376,8 @@ def learner_setup(
     action_head, _ = get_action_head(env.action_spec)
     actor_action_head = hydra.utils.instantiate(action_head, action_dim=env.action_dim)
     actor_network = Actor(torso=actor_torso, action_head=actor_action_head)
+    if actor_params is None:
+        actor_params = actor_network.init(actor_net_key, init_x)
 
     critic_torso = hydra.utils.instantiate(config.network.critic_network.pre_torso)
     critic_network = Critic(torso=critic_torso)
@@ -471,7 +473,7 @@ def run_league_experiment(_config: DictConfig):
     save_dir.mkdir(exist_ok=True, parents=True)
 
     # Initialize league
-    league = LeagueManager()
+    league = LeagueManager(config.league.num_league_steps, [0,1,2,2])
 
     key = jax.random.PRNGKey(config.system.seed)
 
@@ -513,6 +515,10 @@ def run_league_experiment(_config: DictConfig):
 
         actor_params = unreplicate_n_dims(learner_state.params.actor_params)
 
+        # Save checkpoint for this iteration
+        save_args = orbax_utils.save_args_from_target(actor_params)
+        orbax_checkpointer.save(save_dir / str(sp_iter), actor_params, save_args=save_args)
+
         if sp_iter % config.league.steps_per_heuristic_eval == 0:
             print(f"{Fore.GREEN} Calculating WR vs Heuristic Enemy {sp_iter+1}/{config.league.num_league_steps}{Style.RESET_ALL}")
             wr = calculate_winrate_vs_heuristic(actor_params, config)
@@ -520,13 +526,11 @@ def run_league_experiment(_config: DictConfig):
 
         league_state = league.add_policy(actor_params, league_state)
         key, setup_key = jax.random.split(key,2)
-        _, learner_state = learner_setup(
-            env, setup_key, league_state, config, actor_params, critic_params
-        )
 
-        # Save checkpoint for this iteration
-        save_args = orbax_utils.save_args_from_target(actor_params)
-        orbax_checkpointer.save(save_dir / str(sp_iter), actor_params, save_args=save_args)
+        actor_params = league.get_init_params(league_state)
+        _, learner_state = learner_setup(
+            env, setup_key, league_state, config, actor_params, None
+        )
 
 
 def self_play_step(key, learn, learner_state, evaluate, logger: MavaLogger, config, t):
