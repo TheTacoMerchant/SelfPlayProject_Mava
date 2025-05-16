@@ -11,7 +11,7 @@ env:
   # 2s3z | 3s5z | 5m_vs_6m | 10m_vs_11m | 27m_vs_30m | 3s5z_vs_3s6z | 3s_vs_5z | 6h_vs_8z | smacv2_5_units | smacv2_10_units | smacv2_20_units
   scenario:
     name: LearnedPolicyEnemySMAX
-    task_name: 2s3z
+    task_name: 3s5z
 
   # Defines the metric that will be used to evaluate the performance of the agent.
   # This metric is returned at the end of an experiment and can be used for hyperparameter tuning.
@@ -31,7 +31,7 @@ env:
     max_steps: 200
 
 system:
-  num_updates: 1220
+  num_updates: 2048
   num_minibatches: 8
   max_grad_norm: 10
   clip_eps: 0.05
@@ -39,11 +39,13 @@ system:
   rollout_length: 128
   actor_lr: 0.0001
   critic_lr: 0.0001
+  seed: 42
 
 league:
   steps_per_heuristic_eval: 1
   eval_cutoff: 90
-  num_league_steps: 20
+  num_league_steps: 10
+  pfsp_factor: 2
 
 arch:
   num_eval_episodes: 100

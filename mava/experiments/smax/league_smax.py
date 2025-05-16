@@ -109,7 +109,7 @@ class LeagueManager:
 
 
 class LeagueSMAX:
-    def __init__(self, network, **env_kwargs):
+    def __init__(self, network, pfsp_factor, **env_kwargs):
         self._env = SMAX(**env_kwargs)
         # only one team
         self.num_agents = self._env.num_allies
@@ -123,7 +123,7 @@ class LeagueSMAX:
         self.action_spaces = {i: self._env.action_spaces[i] for i in self.agents}
         self.network= network
 
-        self.pfsp_factor = env_kwargs.get("pfsp_factor", 1)
+        self.pfsp_factor = pfsp_factor
 
     def __getattr__(self, name: str):
         return getattr(self._env, name)

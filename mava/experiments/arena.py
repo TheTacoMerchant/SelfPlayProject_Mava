@@ -14,6 +14,33 @@ from mava.experiments.smax import map_name_to_scenario
 from mava.experiments.utils import load_params_from_checkpoint, calculate_winrate, simulate_traj_vs_heuristic
 
 
+def sum_rows_up_to_index_masking(A, b):
+  """
+  Calculates the sum of each row of A up to the column index specified in b, using masking.
+
+  Args:
+    A: A 2D JAX array of shape (X, Y).
+    b: A 1D JAX array of length X, where b_i is the exclusive upper bound
+       for the sum in row i.
+
+  Returns:
+    A 1D JAX array c of length X with the row-wise sums.
+  """
+  num_rows, num_cols = A.shape
+  col_indices = jnp.arange(num_cols)  # Creates [0, 1, ..., Y-1]
+
+  # Create the mask:
+  # b[:, None] reshapes b from (X,) to (X, 1) for broadcasting.
+  # mask[i, j] is True if col_indices[j] < b[i]
+  mask = col_indices < b[:, None]
+
+  # Apply the mask: elements not in the sum become 0
+  masked_A = jnp.where(mask, A, 0)
+
+  # Sum along the columns (axis=1)
+  return jnp.sum(masked_A, axis=1)
+
+
 def calculate_winrate_vs_heuristic(params, config, num_traj = 100, max_steps = None):
     key = jax.random.PRNGKey(2025)
     key, *traj_keys = jax.random.split(key, num_traj+1)
@@ -35,7 +62,7 @@ def calculate_winrate_vs_heuristic(params, config, num_traj = 100, max_steps = N
 
     traj = jax.vmap(simulate_traj_vs_heuristic, in_axes=[0,None,None,None])(jnp.stack(traj_keys), env, network, params)
     done_idxes = jnp.argmax(traj[4]["__all__"], axis=1)
-    done_idxes = jnp.where(done_idxes == 0, 200, done_idxes)
+    done_idxes = jnp.where(done_idxes == 0, env.max_steps, done_idxes)
     print(f"{done_idxes=}")
 
     won_episodes = 0
@@ -44,7 +71,10 @@ def calculate_winrate_vs_heuristic(params, config, num_traj = 100, max_steps = N
         won_episodes += 1 if jnp.any(traj[3]["ally_0"][i][:done_idxes[i]+1] >= 1) else 0
         # enemy_won += 1 if jnp.any(traj[3]["enemy_0"][i][:done_idxes[i]+1] >= 1) else 0
 
-    return won_episodes / num_traj
+    wr = jnp.mean(traj[3]["ally_0"][jnp.arange(num_traj), done_idxes] >= 1)
+    rewards = sum_rows_up_to_index_masking(traj[3]["ally_0"], done_idxes)
+
+    return (wr, jnp.mean(rewards))
 
 @hydra.main(
     config_path="../configs/default",

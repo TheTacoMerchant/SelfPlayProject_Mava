@@ -59,14 +59,13 @@ from mava.utils.training import make_learning_rate
 from mava.wrappers.episode_metrics import get_final_step_metrics
 
 
-def make_envs(config, network: Actor):
+def make_env(config, network: Actor):
     kwargs = dict(config.env.kwargs)
     kwargs["scenario"] = map_name_to_scenario(config.env.scenario.task_name)
 
-    train = RecordEpisodeMetrics(SmaxWrapper(LeagueSMAX(network, **kwargs), False))
-    eval = EvalRecordEpisodeMetrics(SmaxWrapper(SMAX(**kwargs), False))
+    train = RecordEpisodeMetrics(SmaxWrapper(LeagueSMAX(network, config.league.pfsp_factor, **kwargs), False))
 
-    return train, eval
+    return train
 
 
 def get_learner_fn(
@@ -489,7 +488,7 @@ def run_league_experiment(_config: DictConfig):
 
     key, setup_key = jax.random.split(key,2)
 
-    env, eval_env = make_envs(config, network)
+    env = make_env(config, network)
 
     # Setup learner with provided parameters or initialize new ones
     networks, learner_state = learner_setup(
@@ -502,7 +501,6 @@ def run_league_experiment(_config: DictConfig):
     # One key per device for evaluation.
     # eval_act_fn = make_ff_eval_act_fn(networks[0].apply, config)
     # evaluator = get_eval_fn(eval_env, eval_act_fn, config, absolute_metric=False)
-    evaluator = get_league_eval_fn(eval_env, networks[0].apply, config)
 
     # Self-play training loop
     t=0
@@ -510,8 +508,7 @@ def run_league_experiment(_config: DictConfig):
         print(f"{Fore.GREEN}Starting self-play iteration {sp_iter+1}/{config.league.num_league_steps}{Style.RESET_ALL}")
 
         # Train against the league
-        key, sp_key = jax.random.split(key)
-        learner_state, league_state, t = self_play_step(sp_key,learn, learner_state, evaluator, logger, config, t)
+        learner_state, league_state, t = self_play_step(learn, learner_state, logger, config, t)
 
         actor_params = unreplicate_n_dims(learner_state.params.actor_params)
 
@@ -521,8 +518,8 @@ def run_league_experiment(_config: DictConfig):
 
         if sp_iter % config.league.steps_per_heuristic_eval == 0:
             print(f"{Fore.GREEN} Calculating WR vs Heuristic Enemy {sp_iter+1}/{config.league.num_league_steps}{Style.RESET_ALL}")
-            wr = calculate_winrate_vs_heuristic(actor_params, config)
-            logger.log({"winrate_vs_heuristic": wr}, sp_iter, sp_iter/config.league.steps_per_heuristic_eval, LogEvent.ABSOLUTE)
+            wr, avg_reward = calculate_winrate_vs_heuristic(actor_params, config)
+            logger.log({"winrate_vs_heuristic": wr, "reward_vs_hearistic": avg_reward}, sp_iter, sp_iter/config.league.steps_per_heuristic_eval, LogEvent.ABSOLUTE)
 
         league_state = league.add_policy(actor_params, league_state)
         key, setup_key = jax.random.split(key,2)
@@ -533,7 +530,7 @@ def run_league_experiment(_config: DictConfig):
         )
 
 
-def self_play_step(key, learn, learner_state, evaluate, logger: MavaLogger, config, t):
+def self_play_step(learn, learner_state, logger: MavaLogger, config, t):
     # Calculate number of updates per evaluation.
     n_devices = len(jax.devices())
     config.system.num_updates_per_eval = config.system.num_updates // config.arch.num_evaluation
@@ -580,10 +577,10 @@ def self_play_step(key, learn, learner_state, evaluate, logger: MavaLogger, conf
         #     eval_key,
         # )
         # logger.log(eval_metrics, t, eval_step, LogEvent.EVAL)
+        mean_wr  = jnp.mean(learner_state.env_state.env_state.state.winrates, axis=(0,1,2))
+        logger.log({"lowest winrate": jnp.min(100* mean_wr)}, t, eval_step, LogEvent.TRAIN)
 
-        logger.log({"lowest winrate": jnp.min(100* league_state.winrates)}, t, eval_step, LogEvent.TRAIN)
-
-        if jnp.min(100* league_state.winrates) >= config.league.eval_cutoff:
+        if jnp.min(100* mean_wr) >= config.league.eval_cutoff:
             return learner_state, league_state, t
 
     print("Failed to reach cutoff before timeout.")
@@ -601,7 +598,7 @@ def hydra_entry_point(cfg: DictConfig) -> float:
     OmegaConf.set_struct(cfg, False)
 
     # Overrides
-    cfg.system.seed = 2025
+    # cfg.system.seed = 2025
 
     # Run experiment.
     eval_performance = run_league_experiment(cfg)
