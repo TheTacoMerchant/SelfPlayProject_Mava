@@ -67,6 +67,7 @@ MAP_NAME_TO_SCENARIO = {
         False,
         False,
     ),
+    "6s9z": Scenario(jnp.array([2,2,2,2,2,2,3,3,3,3,3,3,3,3,3]*2, dtype=jnp.uint8), 15,15, False, False),
     "8m": Scenario(jnp.zeros((16,), dtype=jnp.uint8), 8, 8, False, False),
     "5m_vs_6m": Scenario(jnp.zeros((11,), dtype=jnp.uint8), 5, 6, False, False),
     "10m_vs_11m": Scenario(jnp.zeros((21,), dtype=jnp.uint8), 10, 11, False, False),
@@ -94,6 +95,7 @@ MAP_NAME_TO_SCENARIO = {
         False,
     ),
     "smacv2_5_units": Scenario(jnp.zeros((10,), dtype=jnp.uint8), 5, 5, True, True),
+    "smacv2_5_units_custom": Scenario(jnp.zeros((10,), dtype=jnp.uint8), 5, 5, False, True),
     "smacv2_10_units": Scenario(jnp.zeros((20,), dtype=jnp.uint8), 10, 10, True, True),
     "smacv2_20_units": Scenario(jnp.zeros((40,), dtype=jnp.uint8), 20, 20, True, True),
 }
