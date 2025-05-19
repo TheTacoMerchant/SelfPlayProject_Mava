@@ -472,14 +472,15 @@ def run_league_experiment(_config: DictConfig):
     save_dir.mkdir(exist_ok=True, parents=True)
 
     # Initialize league
-    league = LeagueManager(config.league.num_league_steps, [0,1,2,2])
+    training_pattern = [0,1,2,2]
+    league = LeagueManager(config.league.num_league_steps, training_pattern)
 
     key = jax.random.PRNGKey(config.system.seed)
 
     # Add initial policy to league
     key, init_actor_key = jax.random.split(key)
     network, actor_params = enemy_setup(init_actor_key, config)
-    league_state = league.reset(actor_params, config.league.num_league_steps)
+    league_state = league.reset(actor_params, config.league.num_league_steps, len(training_pattern))
     critic_params = None
 
     # Save initial checkpoint
@@ -522,9 +523,9 @@ def run_league_experiment(_config: DictConfig):
             logger.log({"winrate_vs_heuristic": wr, "reward_vs_hearistic": avg_reward}, sp_iter, sp_iter/config.league.steps_per_heuristic_eval, LogEvent.ABSOLUTE)
 
         league_state = league.add_policy(actor_params, league_state)
-        key, setup_key = jax.random.split(key,2)
+        key, init_key, setup_key = jax.random.split(key,3)
 
-        actor_params = league.get_init_params(league_state)
+        actor_params = league.get_init_params(init_key, league_state)
         _, learner_state = learner_setup(
             env, setup_key, league_state, config, actor_params, None
         )

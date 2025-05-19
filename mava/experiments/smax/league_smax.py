@@ -6,6 +6,7 @@ import chex
 import jax
 import jax.numpy as jnp
 from flax.struct import dataclass
+from flax.linen.initializers import lecun_normal
 
 from mava.experiments.smax.heuristic_enemy_smax_env import State
 from mava.experiments.smax.smax_env import SMAX
@@ -33,9 +34,7 @@ class LeagueState:
     n_league_members: int
     current_step:int
 
-    last_main_idx:int
-    last_me_idx:int
-    last_le_idx:int
+    agent_idxes: chex.Array
 
     selected_opponent: int
     selected_params: chex.Array
@@ -56,18 +55,21 @@ class LeagueManager:
         rem = total_agents - len(pattern) * n_reps
 
         ls = pattern * n_reps + [0]*rem
-        self.learner_schedule = jnp.array(ls)
+        self.learner_schedule_types = jnp.array(ls)
 
-    def reset(self, current_learner, max_members, num_exploiters=None) -> LeagueState:
+        id_ls = list(range(len(pattern)))
+        id_ls = id_ls * n_reps + [0]*rem
+        self.learner_schedule_ids = jnp.array(id_ls)
+
+
+    def reset(self, current_learner, max_members, num_persistent=None) -> LeagueState:
         broadcast = lambda x: jnp.broadcast_to(x, (max_members, *x.shape))
 
         return LeagueState(
             env_state=None,
             max_league_members=max_members,
             current_step=0,
-            last_main_idx=0,
-            last_me_idx=0,
-            last_le_idx=0,
+            agent_idxes=jnp.zeros(num_persistent, dtype=jnp.uint16),
             selected_opponent=0,
             selected_params=None,
             n_league_members=1,
@@ -87,25 +89,35 @@ class LeagueManager:
             member_params = jax.tree.map(lambda x,y : x.at[weakest_idx].set(y), old_state.member_params, actor_params)
             last_idx = weakest_idx
 
-        last_main_idx = jnp.where(self.learner_schedule[old_state.current_step] == 0, last_idx, old_state.last_main_idx)
+        agent_idxes = old_state.agent_idxes.at[self.learner_schedule_ids[old_state.current_step]].set(last_idx)
 
         main_mask = jnp.where(jnp.arange(old_state.max_league_members) < n_league_members, 0.0, 1.0)
-        me_mask = jnp.where(jnp.arange(old_state.max_league_members) == last_main_idx, 0.0, 1.0)
+        me_mask = jnp.where(jnp.arange(old_state.max_league_members) == agent_idxes[0], 0.0, 1.0)
 
-        mask = jnp.where(self.learner_schedule[old_state.current_step+1] == 1, me_mask, main_mask)
+        mask = jnp.where(self.learner_schedule_types[old_state.current_step+1] == 1, me_mask, main_mask)
 
         return old_state.replace(n_league_members=n_league_members,
                                  winrates=mask,
-                                 last_main_idx=last_main_idx,
+                                 agent_idxes=agent_idxes,
                                  current_step=old_state.current_step+1,
                                  member_params=member_params)
 
-    def get_init_params(self, state: LeagueState) -> Optional[Dict]:
-        last_me_params = jax.tree.map(lambda x: x[state.last_main_idx], state.member_params)
-        if self.learner_schedule[state.current_step] == 0:
-            return last_me_params
+    def get_init_params(self, key, state: LeagueState) -> Optional[Dict]:
+        if self.learner_schedule_types[state.current_step] == 0:
+            return jax.tree.map(lambda x: x[state.agent_idxes[0]], state.member_params)
+        elif self.learner_schedule_types[state.current_step] == 2:
+            current_id = self.learner_schedule_ids[state.current_step]
+            latest_params = jax.tree.map(lambda x: x[state.agent_idxes[current_id]], state.member_params)
+            return reset_action_head(key, latest_params)
         else:
             return None # For now, we always reset exploiters
+
+def reset_action_head(key, params):
+    init_fn = lecun_normal()
+    params["params"]["action_head"]["Dense_0"]["kernel"] = init_fn(key, params["params"]["action_head"]["Dense_0"]["kernel"].shape)
+    params["params"]["action_head"]["Dense_0"]["bias"] = jnp.zeros_like(params["params"]["action_head"]["Dense_0"]["bias"])
+
+    return params
 
 
 class LeagueSMAX:
