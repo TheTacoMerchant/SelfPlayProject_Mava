@@ -583,11 +583,11 @@ def self_play_step(learn, learner_state, logger: MavaLogger, config, t):
         logger.log({"lowest winrate": lowest}, t, eval_step, LogEvent.TRAIN)
 
         if jnp.min(100* mean_wr) >= config.league.eval_cutoff:
-            logger.log({"final_lowest_winrate": lowest}, t, LogEvent.ABSOLUTE)
+            logger.log({"final_lowest_winrate": lowest}, t, eval_step, LogEvent.ABSOLUTE)
             return learner_state, league_state, t
 
     print("Failed to reach cutoff before timeout.")
-    logger.log({"final_lowest_winrate": lowest}, t, LogEvent.ABSOLUTE)
+    logger.log({"final_lowest_winrate": lowest}, t, config.arch.num_evaluation-1, LogEvent.ABSOLUTE)
     return learner_state, league_state, t
 
 

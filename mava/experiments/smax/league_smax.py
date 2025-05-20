@@ -73,7 +73,7 @@ class LeagueManager:
             selected_opponent=0,
             selected_params=None,
             n_league_members=1,
-            winrates=jnp.where(jnp.arange(max_members) < 1, 0.0, 1.0),
+            winrates=jnp.where(jnp.arange(max_members) < 1, 1e-5, 1.0),
             member_params=jax.tree.map(broadcast, current_learner),
         )
 
@@ -91,8 +91,8 @@ class LeagueManager:
 
         agent_idxes = old_state.agent_idxes.at[self.learner_schedule_ids[old_state.current_step]].set(last_idx)
 
-        main_mask = jnp.where(jnp.arange(old_state.max_league_members) < n_league_members, 0.0, 1.0)
-        me_mask = jnp.where(jnp.arange(old_state.max_league_members) == agent_idxes[0], 0.0, 1.0)
+        main_mask = jnp.where(jnp.arange(old_state.max_league_members) < n_league_members, 1e-5, 1.0)
+        me_mask = jnp.where(jnp.arange(old_state.max_league_members) == agent_idxes[0], 1e-5, 1.0)
 
         mask = jnp.where(self.learner_schedule_types[old_state.current_step+1] == 1, me_mask, main_mask)
 
@@ -186,7 +186,10 @@ class LeagueSMAX:
     def _select_opponent(self, key: chex.PRNGKey, league_state: LeagueState) -> LeagueState:
         key, subkey = jax.random.split(key)
         # index = jax.random.randint(subkey, shape=(), minval=0, maxval=league_state.n_league_members)
-        probs = (1-league_state.winrates)**self.pfsp_factor/jnp.sum((1-league_state.winrates)**self.pfsp_factor)
+        hard_probs = (1-league_state.winrates)**self.pfsp_factor/jnp.sum((1-league_state.winrates)**self.pfsp_factor)
+        var_probs = league_state.winrates*(1-league_state.winrates)
+        struggling = (jnp.mean(league_state.winrates, where=(league_state.winrates != 1.0)) < 0.2)
+        probs = jnp.where(struggling, var_probs, hard_probs)
         index = jax.random.categorical(subkey, logits=jnp.log(probs))
 
         opp_params = jax.tree.map(lambda x: x[index], league_state.member_params)

@@ -97,7 +97,9 @@ MAP_NAME_TO_SCENARIO = {
     "smacv2_5_units": Scenario(jnp.zeros((10,), dtype=jnp.uint8), 5, 5, True, True),
     "smacv2_5_units_custom": Scenario(jnp.zeros((10,), dtype=jnp.uint8), 5, 5, False, True),
     "smacv2_10_units": Scenario(jnp.zeros((20,), dtype=jnp.uint8), 10, 10, True, True),
+    "smacv2_10_units_custom": Scenario(jnp.zeros((20,), dtype=jnp.uint8), 10, 10, False, True),
     "smacv2_20_units": Scenario(jnp.zeros((40,), dtype=jnp.uint8), 20, 20, True, True),
+    "smacv2_20_units_custom": Scenario(jnp.zeros((40,), dtype=jnp.uint8), 20, 20, False, True),
 }
 
 
@@ -294,6 +296,7 @@ class SMAX(MultiAgentEnv):
         )
         key, unit_type_key = jax.random.split(key)
         generated_unit_types = self.unit_type_generator.generate(unit_type_key)
+        jax.debug.print("Units: {}", generated_unit_types)
         unit_types = jax.lax.select(
             self.smacv2_unit_type_generation, generated_unit_types, unit_types
         )
