@@ -175,3 +175,6 @@ outputs/
 multirun/
 .neptune
 .aider*
+*.mp4
+*.json
+*.pdf

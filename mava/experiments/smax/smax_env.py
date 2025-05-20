@@ -296,7 +296,6 @@ class SMAX(MultiAgentEnv):
         )
         key, unit_type_key = jax.random.split(key)
         generated_unit_types = self.unit_type_generator.generate(unit_type_key)
-        jax.debug.print("Units: {}", generated_unit_types)
         unit_types = jax.lax.select(
             self.smacv2_unit_type_generation, generated_unit_types, unit_types
         )
