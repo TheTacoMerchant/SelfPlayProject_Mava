@@ -188,7 +188,7 @@ class LeagueSMAX:
         # index = jax.random.randint(subkey, shape=(), minval=0, maxval=league_state.n_league_members)
         hard_probs = (1-league_state.winrates)**self.pfsp_factor/jnp.sum((1-league_state.winrates)**self.pfsp_factor)
         var_probs = league_state.winrates*(1-league_state.winrates)
-        struggling = (jnp.mean(league_state.winrates, where=(league_state.winrates != 1.0)) < 0.2)
+        struggling = (jnp.mean(league_state.winrates, where=(league_state.winrates != 1.0)) < 0.0) #TODO: Make this configurable
         probs = jnp.where(struggling, var_probs, hard_probs)
         index = jax.random.categorical(subkey, logits=jnp.log(probs))
 

@@ -509,7 +509,9 @@ def run_league_experiment(_config: DictConfig):
         print(f"{Fore.GREEN}Starting self-play iteration {sp_iter+1}/{config.league.num_league_steps}{Style.RESET_ALL}")
 
         # Train against the league
-        learner_state, league_state, t = self_play_step(learn, learner_state, logger, config, t)
+        learner_state, league_state, t, final_lowest_wr = self_play_step(learn, learner_state, logger, config, t)
+        logger.log({"final_lowest_winrate": final_lowest_wr}, sp_iter, None, LogEvent.ABSOLUTE)
+
 
         actor_params = unreplicate_n_dims(learner_state.params.actor_params)
 
@@ -582,13 +584,11 @@ def self_play_step(learn, learner_state, logger: MavaLogger, config, t):
         lowest = jnp.min(100* mean_wr)
         logger.log({"lowest winrate": lowest}, t, eval_step, LogEvent.TRAIN)
 
-        if jnp.min(100* mean_wr) >= config.league.eval_cutoff:
-            logger.log({"final_lowest_winrate": lowest}, t, eval_step, LogEvent.ABSOLUTE)
-            return learner_state, league_state, t
+        if lowest >= config.league.eval_cutoff:
+            return learner_state, league_state, t, lowest
 
     print("Failed to reach cutoff before timeout.")
-    logger.log({"final_lowest_winrate": lowest}, t, config.arch.num_evaluation-1, LogEvent.ABSOLUTE)
-    return learner_state, league_state, t
+    return learner_state, league_state, t, lowest
 
 
 @hydra.main(
