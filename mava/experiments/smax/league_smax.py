@@ -40,6 +40,8 @@ class LeagueState:
     selected_params: chex.Array
     winrates: chex.Array
     member_params: chex.ArrayTree
+    critic_params: chex.ArrayTree
+    
 
 
 class LeagueManager:
@@ -62,8 +64,9 @@ class LeagueManager:
         self.learner_schedule_ids = jnp.array(id_ls)
 
 
-    def reset(self, current_learner, max_members, num_persistent=None) -> LeagueState:
-        broadcast = lambda x: jnp.broadcast_to(x, (max_members, *x.shape))
+    def reset(self, actor_params, critic_params, max_members, num_persistent) -> LeagueState:
+        broadcast_a = lambda x: jnp.broadcast_to(x, (max_members, *x.shape))
+        broadcast_c = lambda x: jnp.broadcast_to(x, (num_persistent, *x.shape))
 
         return LeagueState(
             env_state=None,
@@ -74,48 +77,71 @@ class LeagueManager:
             selected_params=None,
             n_league_members=1,
             winrates=jnp.where(jnp.arange(max_members) < 1, 1e-5, 1.0),
-            member_params=jax.tree.map(broadcast, current_learner),
+            member_params=jax.tree.map(broadcast_a, actor_params),
+            critic_params=jax.tree.map(broadcast_c, critic_params),
         )
 
-    def add_policy(self, actor_params, old_state: LeagueState) -> LeagueState:
+    def add_policy(self, member_params, critic_params, old_state: LeagueState) -> LeagueState:
         """Add a new policy to the league."""
         if old_state.n_league_members < old_state.max_league_members:
             n_league_members = old_state.n_league_members+1
-            member_params = jax.tree.map(lambda x,y : x.at[n_league_members-1].set(y), old_state.member_params, actor_params)
+            member_params = jax.tree.map(lambda x,y : x.at[n_league_members-1].set(y), old_state.member_params, member_params)
             last_idx = n_league_members-1
         else:
             n_league_members = old_state.max_league_members
             weakest_idx = jnp.argmax(old_state.winrates)
-            member_params = jax.tree.map(lambda x,y : x.at[weakest_idx].set(y), old_state.member_params, actor_params)
+            member_params = jax.tree.map(lambda x,y : x.at[weakest_idx].set(y), old_state.member_params, member_params)
             last_idx = weakest_idx
 
-        agent_idxes = old_state.agent_idxes.at[self.learner_schedule_ids[old_state.current_step]].set(last_idx)
+        step = self.learner_schedule_ids[old_state.current_step]
+        agent_idxes = old_state.agent_idxes.at[step].set(last_idx)
+        critic_params = jax.tree.map(lambda x,y : x.at[step].set(y), old_state.critic_params, critic_params)
 
         main_mask = jnp.where(jnp.arange(old_state.max_league_members) < n_league_members, 1e-5, 1.0)
         me_mask = jnp.where(jnp.arange(old_state.max_league_members) == agent_idxes[0], 1e-5, 1.0)
 
         mask = jnp.where(self.learner_schedule_types[old_state.current_step+1] == 1, me_mask, main_mask)
 
-        return old_state.replace(n_league_members=n_league_members,
-                                 winrates=mask,
-                                 agent_idxes=agent_idxes,
-                                 current_step=old_state.current_step+1,
-                                 member_params=member_params)
+        return old_state.replace(
+            n_league_members=n_league_members,
+            winrates=mask,
+            agent_idxes=agent_idxes,
+            current_step=old_state.current_step+1,
+            member_params=member_params,
+            critic_params=critic_params,
+        )
 
     def get_init_params(self, key, state: LeagueState) -> Optional[Dict]:
-        if self.learner_schedule_types[state.current_step] == 0:
-            return jax.tree.map(lambda x: x[state.agent_idxes[0]], state.member_params)
-        elif self.learner_schedule_types[state.current_step] == 2:
-            current_id = self.learner_schedule_ids[state.current_step]
-            latest_params = jax.tree.map(lambda x: x[state.agent_idxes[current_id]], state.member_params)
-            return reset_action_head(key, latest_params)
-        else:
-            return None # For now, we always reset exploiters
+        if state.agent_idxes[state.current_step] == 0:
+            return None, None
 
-def reset_action_head(key, params):
+        if self.learner_schedule_types[state.current_step] == 0:
+            actor_params = jax.tree.map(lambda x: x[state.agent_idxes[0]], state.member_params)
+            critic_params = jax.tree.map(lambda x: x[state.agent_idxes[0]], state.critic_params)
+        elif self.learner_schedule_types[state.current_step] == 2:
+            actor_key, critic_key = jax.random.split(key)
+            current_id = self.learner_schedule_ids[state.current_step]
+            actor_params = jax.tree.map(lambda x: x[state.agent_idxes[current_id]], state.member_params)
+            actor_params = zap_action_head(actor_key, actor_params)
+
+            critic_params = jax.tree.map(lambda x: x[current_id], state.critic_params)
+            critic_params = zap_value_head(critic_key, critic_params)
+        else:
+            actor_params, critic_params = None, None # For now, we always reset exploiters
+        
+        return actor_params, critic_params
+
+def zap_action_head(key, params):
     init_fn = lecun_normal()
     params["params"]["action_head"]["Dense_0"]["kernel"] = init_fn(key, params["params"]["action_head"]["Dense_0"]["kernel"].shape)
     params["params"]["action_head"]["Dense_0"]["bias"] = jnp.zeros_like(params["params"]["action_head"]["Dense_0"]["bias"])
+
+    return params
+
+def zap_value_head(key, params):
+    init_fn = lecun_normal()
+    params["params"]["Dense_0"]["kernel"] = init_fn(key, params["params"]["Dense_0"]["kernel"].shape)
+    params["params"]["Dense_0"]["bias"] = jnp.zeros_like(params["params"]["Dense_0"]["bias"])
 
     return params
 

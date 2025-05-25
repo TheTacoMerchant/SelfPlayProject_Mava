@@ -136,8 +136,7 @@ def get_learner_fn(
             traj_batch, last_val, last_done, config.system.gamma, config.system.gae_lambda
         )
 
-        # Update winrates
-        jax.debug.print("Winrates: {}", jnp.round(jnp.mean(env_state.env_state.state.winrates, axis=0),2))
+        # jax.debug.print("Winrates: {}", jnp.round(jnp.mean(env_state.env_state.state.winrates, axis=0),2))
 
         def _update_epoch(update_state: Tuple, _: Any) -> Tuple:
             """Update the network for a single epoch."""
@@ -332,10 +331,15 @@ def enemy_setup(key, config) -> Tuple[Actor, FrozenDict]:
 
     actor_network = Actor(torso=actor_torso, action_head=actor_action_head)
 
-    obs = mock_env.observation_spec.generate_value()
-    actor_params = actor_network.init(key, obs)
+    critic_torso = hydra.utils.instantiate(config.network.critic_network.pre_torso)
+    critic_network = Critic(torso=critic_torso)
 
-    return (actor_network, actor_params)
+    obs = mock_env.observation_spec.generate_value()
+    actor_key, critic_key = jax.random.split(key)
+    actor_params = actor_network.init(actor_key, obs)
+    critic_params = critic_network.init(critic_key, obs)
+
+    return (actor_network, actor_params, critic_params)
 
 
 def get_optim(config):
@@ -479,9 +483,8 @@ def run_league_experiment(_config: DictConfig):
 
     # Add initial policy to league
     key, init_actor_key = jax.random.split(key)
-    network, actor_params = enemy_setup(init_actor_key, config)
-    league_state = league.reset(actor_params, config.league.num_league_steps, len(training_pattern))
-    critic_params = None
+    network, actor_params, critic_params = enemy_setup(init_actor_key, config)
+    league_state = league.reset(actor_params, critic_params, config.league.num_league_steps, len(training_pattern))
 
     # Save initial checkpoint
     save_args = orbax_utils.save_args_from_target(actor_params)
@@ -513,7 +516,7 @@ def run_league_experiment(_config: DictConfig):
         logger.log({"final_lowest_winrate": final_lowest_wr}, sp_iter, None, LogEvent.ABSOLUTE)
 
 
-        actor_params = unreplicate_n_dims(learner_state.params.actor_params)
+        actor_params, critic_params = unreplicate_n_dims(learner_state.params)
 
         # Save checkpoint for this iteration
         save_args = orbax_utils.save_args_from_target(actor_params)
@@ -524,12 +527,12 @@ def run_league_experiment(_config: DictConfig):
             wr, avg_reward = calculate_winrate_vs_heuristic(actor_params, config)
             logger.log({"winrate_vs_heuristic": wr, "reward_vs_hearistic": avg_reward}, sp_iter, sp_iter/config.league.steps_per_heuristic_eval, LogEvent.ABSOLUTE)
 
-        league_state = league.add_policy(actor_params, league_state)
+        league_state = league.add_policy(actor_params, critic_params, league_state)
         key, init_key, setup_key = jax.random.split(key,3)
 
-        actor_params = league.get_init_params(init_key, league_state)
+        actor_params, critic_params = league.get_init_params(init_key, league_state)
         _, learner_state = learner_setup(
-            env, setup_key, league_state, config, actor_params, None
+            env, setup_key, league_state, config, actor_params, critic_params
         )
 
 
@@ -581,6 +584,7 @@ def self_play_step(learn, learner_state, logger: MavaLogger, config, t):
         # )
         # logger.log(eval_metrics, t, eval_step, LogEvent.EVAL)
         mean_wr  = jnp.mean(learner_state.env_state.env_state.state.winrates, axis=(0,1,2))
+        jax.debug.print("Winrates: {}", mean_wr)
         lowest = jnp.min(100* mean_wr)
         logger.log({"lowest winrate": lowest}, t, eval_step, LogEvent.TRAIN)
 
