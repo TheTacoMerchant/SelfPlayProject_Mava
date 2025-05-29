@@ -104,6 +104,8 @@ def get_learner_fn(
         ) -> Tuple[LearnerState, Tuple[PPOTransition, Metrics]]:
             """Step the environment."""
             params, opt_states, key, env_state, last_timestep, last_done = learner_state
+            broadcast = lambda x: jnp.broadcast_to(x, (config.arch.num_envs, *x.shape))
+            env_state = env_state.replace(env_state=env_state.env_state.replace(state=env_state.env_state.state.replace(sp_params=jax.tree.map(broadcast, params.actor_params))))
 
             # Select action
             key, policy_key = jax.random.split(key)
@@ -588,10 +590,10 @@ def self_play_step(learn, learner_state, logger: MavaLogger, config, t):
         lowest = jnp.min(100* mean_wr)
         logger.log({"lowest winrate": lowest}, t, eval_step, LogEvent.TRAIN)
 
-        if lowest >= config.league.eval_cutoff:
+        if (lowest >= config.league.eval_cutoff) and league_state.current_type != 0:
             return learner_state, league_state, t, lowest
 
-    print("Failed to reach cutoff before timeout.")
+    print("Timeout reached.")
     return learner_state, league_state, t, lowest
 
 

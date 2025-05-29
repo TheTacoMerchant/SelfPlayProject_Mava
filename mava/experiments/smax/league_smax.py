@@ -33,12 +33,17 @@ class LeagueState:
     max_league_members: int
     n_league_members: int
     current_step:int
+    current_type: int
 
     agent_idxes: chex.Array
 
     selected_opponent: int
     selected_params: chex.Array
     winrates: chex.Array
+
+    sp_params: chex.ArrayTree
+    sp_enabled: bool
+
     member_params: chex.ArrayTree
     critic_params: chex.ArrayTree
     
@@ -72,11 +77,14 @@ class LeagueManager:
             env_state=None,
             max_league_members=max_members,
             current_step=0,
+            current_type=0,
             agent_idxes=jnp.zeros(num_persistent, dtype=jnp.uint16),
             selected_opponent=0,
             selected_params=None,
             n_league_members=1,
             winrates=jnp.where(jnp.arange(max_members) < 1, 1e-5, 1.0),
+            sp_params=actor_params,
+            sp_enabled=False,
             member_params=jax.tree.map(broadcast_a, actor_params),
             critic_params=jax.tree.map(broadcast_c, critic_params),
         )
@@ -109,6 +117,7 @@ class LeagueManager:
             current_step=old_state.current_step+1,
             member_params=member_params,
             critic_params=critic_params,
+            current_type=self.learner_schedule_types[old_state.current_step+1],
         )
 
     def get_init_params(self, key, state: LeagueState) -> Optional[Dict]:
@@ -182,6 +191,7 @@ class LeagueSMAX:
         win = (rewards['ally_0'] >= 1.0)
 
         updated_wr = state.winrates.at[state.selected_opponent].set(state.winrates[state.selected_opponent]*0.9 + 0.1*win)
+        updated_wr = jnp.where(state.sp_enabled, state.winrates, updated_wr)
 
         if reset_state is None:
             obs_re, states_re = self.reset(key_reset, state)
@@ -209,23 +219,23 @@ class LeagueSMAX:
         league_state = league_state.replace(env_state=state)
         return new_obs, league_state
 
-    def _select_opponent(self, key: chex.PRNGKey, league_state: LeagueState) -> LeagueState:
+    def get_enemy_policy_initial_state(self, key: chex.PRNGKey, league_state: LeagueState) -> LeagueState:
         key, subkey = jax.random.split(key)
         # index = jax.random.randint(subkey, shape=(), minval=0, maxval=league_state.n_league_members)
         hard_probs = (1-league_state.winrates)**self.pfsp_factor/jnp.sum((1-league_state.winrates)**self.pfsp_factor)
-        var_probs = league_state.winrates*(1-league_state.winrates)
-        struggling = (jnp.mean(league_state.winrates, where=(league_state.winrates != 1.0)) < 0.0) #TODO: Make this configurable
-        probs = jnp.where(struggling, var_probs, hard_probs)
-        index = jax.random.categorical(subkey, logits=jnp.log(probs))
+        # var_probs = league_state.winrates*(1-league_state.winrates)
+        # struggling = (jnp.mean(league_state.winrates, where=(league_state.winrates != 1.0)) < 0.0) #TODO: Make this configurable
+        # probs = jnp.where(struggling, var_probs, hard_probs)
+        index = jax.random.categorical(subkey, logits=jnp.log(hard_probs))
 
-        opp_params = jax.tree.map(lambda x: x[index], league_state.member_params)
+        opp_params_pfsp = jax.tree.map(lambda x: x[index], league_state.member_params)
+        sp_key, key = jax.random.split(key)
+        use_sp = jax.random.bernoulli(sp_key, 0.35) * (league_state.current_type == 0)
+        opp_params = jax.tree.map(lambda x, y: jnp.where(use_sp, x, y), league_state.sp_params, opp_params_pfsp)
 
-        league_state = league_state.replace(selected_opponent=index, selected_params=opp_params)
+        league_state = league_state.replace(selected_opponent=index, selected_params=opp_params, sp_enabled=use_sp)
 
         return league_state
-
-    def get_enemy_policy_initial_state(self, key, league_state: LeagueState):
-        return self._select_opponent(key, league_state)
 
     def get_enemy_actions(self, key, policy_state, enemy_obs, state):
         enemy_obs = Observation(
