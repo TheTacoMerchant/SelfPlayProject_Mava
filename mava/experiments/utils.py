@@ -58,12 +58,13 @@ def simulate_traj(key, env: SMAX, ally_net, ally_params, enemy_net, enemy_params
     return traj
 
 
-def calculate_winrate(ally, enemy, config, num_traj = 100):
+def calculate_winrate(ally, enemy, config, num_traj = 100, no_swap=False):
     key = jax.random.PRNGKey(2025)
     key, *traj_keys = jax.random.split(key, num_traj+1)
 
     kwargs = dict(config.env.kwargs)
     kwargs["scenario"] = map_name_to_scenario(config.env.scenario.task_name)
+    kwargs["swap_chance"] = 0.0 if no_swap else 0.5
 
     # Initialize environment
     env = SMAX(**kwargs)

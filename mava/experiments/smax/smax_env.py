@@ -148,6 +148,7 @@ class SMAX(MultiAgentEnv):
         smacv2_unit_type_generation=False,
         observation_type="unit_list",
         action_type="discrete",
+        swap_chance=0.5,
     ) -> None:
         self.num_allies = num_allies if scenario is None else scenario.num_allies
         self.num_enemies = num_enemies if scenario is None else scenario.num_enemies
@@ -234,6 +235,7 @@ class SMAX(MultiAgentEnv):
             agent: self._get_individual_action_space(i)
             for i, agent in enumerate(self.agents)
         }
+        self.swap_chance = swap_chance
 
     def _get_individual_action_space(self, i):
         if self.action_type == "discrete":
@@ -268,7 +270,7 @@ class SMAX(MultiAgentEnv):
         """Environment-specific reset."""
         key, team_0_key, team_1_key, swap_key = jax.random.split(key, 4)
 
-        swap = jax.random.bernoulli(swap_key)
+        swap = jax.random.bernoulli(swap_key, self.swap_chance)
 
         team_0_start = jnp.stack([jnp.array([self.map_width / 4 + self.map_width / 2 * swap, self.map_height / 2])] * self.num_allies)
         team_0_start_noise = jax.random.uniform(

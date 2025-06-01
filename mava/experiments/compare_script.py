@@ -22,6 +22,6 @@ def main(cfg):
         # enemy_params = jax.tree.map(lambda x : jnp.squeeze(x), enemy_params)
 
         # print(f"Iter {iter} vs IPPO-trained: {100 * calculate_winrate(ally_params, enemy_params, cfg)}")
-        print(f"Iter {iter} vs best-versus-heuristic(5): {100 * calculate_winrate(ally_params, enemy_params, cfg, max_steps=cfg.env.kwargs.max_steps)}")
+        print(f"Iter {iter} vs best-versus-heuristic(5): {100 * calculate_winrate(ally_params, enemy_params, cfg, max_steps=cfg.env.kwargs.max_steps, no_swap=True)}")
 
 main()

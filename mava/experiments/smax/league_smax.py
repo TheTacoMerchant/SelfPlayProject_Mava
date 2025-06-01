@@ -131,10 +131,10 @@ class LeagueManager:
             actor_key, critic_key = jax.random.split(key)
             current_id = self.learner_schedule_ids[state.current_step]
             actor_params = jax.tree.map(lambda x: x[state.agent_idxes[current_id]], state.member_params)
-            actor_params = zap_action_head(actor_key, actor_params)
+            # actor_params = zap_action_head(actor_key, actor_params)
 
             critic_params = jax.tree.map(lambda x: x[current_id], state.critic_params)
-            critic_params = zap_value_head(critic_key, critic_params)
+            # critic_params = zap_value_head(critic_key, critic_params)
         else:
             actor_params, critic_params = None, None # For now, we always reset exploiters
         

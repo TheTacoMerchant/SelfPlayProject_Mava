@@ -466,7 +466,7 @@ def run_experiment(_config: DictConfig) -> float:
     # Setup checkpointing
     orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
     timestamp = datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
-    save_dir = (pathlib.Path().absolute() / f"checkpoints/ippo/{timestamp}").absolute()
+    save_dir = (pathlib.Path().absolute() / f"checkpoints/ippo/{config.env.scenario.task_name}{config.system.seed}").absolute()
     save_dir.mkdir(exist_ok=True, parents=True)
 
     # Run experiment for a total number of evaluations.
@@ -532,7 +532,7 @@ def run_experiment(_config: DictConfig) -> float:
 
 @hydra.main(
     config_path="../configs/default",
-    config_name="ff_ippo.yaml",
+    config_name="ff_ippo_sp.yaml",
     version_base="1.2",
 )
 def hydra_entry_point(cfg: DictConfig) -> float:
