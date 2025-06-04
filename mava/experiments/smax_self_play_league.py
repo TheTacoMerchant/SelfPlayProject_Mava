@@ -474,7 +474,7 @@ def run_league_experiment(_config: DictConfig):
     # Setup checkpointing
     orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
     timestamp = datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
-    save_dir = (pathlib.Path().absolute() / f"checkpoints/league/{timestamp}").absolute()
+    save_dir = (pathlib.Path().absolute() / f"checkpoints/league/comp_exp/{config.env.scenario.task_name}/{config.system.seed}").absolute()
     save_dir.mkdir(exist_ok=True, parents=True)
 
     # Initialize league
