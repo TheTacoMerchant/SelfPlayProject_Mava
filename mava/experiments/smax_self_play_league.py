@@ -63,7 +63,7 @@ def make_env(config, network: Actor):
     kwargs = dict(config.env.kwargs)
     kwargs["scenario"] = map_name_to_scenario(config.env.scenario.task_name)
 
-    train = RecordEpisodeMetrics(SmaxWrapper(LeagueSMAX(network, config.league.pfsp_factor, **kwargs), False))
+    train = RecordEpisodeMetrics(SmaxWrapper(LeagueSMAX(network, config.league.pfsp_factor, config.league.sp_prob, **kwargs), False))
 
     return train
 
@@ -474,10 +474,11 @@ def run_league_experiment(_config: DictConfig):
     # Setup checkpointing
     orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
     timestamp = datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
-    save_dir = (pathlib.Path().absolute() / f"checkpoints/league/comp_exp/{config.env.scenario.task_name}/{config.system.seed}").absolute()
+    save_dir = (pathlib.Path().absolute() / f"checkpoints/league/ablations/PFSP_SP_ME_LE").absolute()
     save_dir.mkdir(exist_ok=True, parents=True)
 
     # Initialize league
+    # training_pattern = [0, 1]
     training_pattern = [0,1,2,2]
     league = LeagueManager(config.league.num_league_steps, training_pattern)
 

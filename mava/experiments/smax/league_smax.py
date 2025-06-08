@@ -135,10 +135,28 @@ class LeagueManager:
 
             critic_params = jax.tree.map(lambda x: x[current_id], state.critic_params)
             # critic_params = zap_value_head(critic_key, critic_params)
+
+            # actor_params = add_noise_action_head(actor_key, actor_params)
+            # critic_params = add_noise_value_head(critic_key, critic_params)
         else:
             actor_params, critic_params = None, None # For now, we always reset exploiters
         
         return actor_params, critic_params
+
+def add_noise(key, x):
+    return x + jax.random.normal(key, x.shape) * jnp.mean(jnp.abs(x))*0.05
+
+def add_noise_action_head(key, params):
+    key1, key2 = jax.random.split(key)
+    params["params"]["action_head"]["Dense_0"]["kernel"] = add_noise(key1, params["params"]["action_head"]["Dense_0"]["kernel"])
+    params["params"]["action_head"]["Dense_0"]["bias"] = add_noise(key2, params["params"]["action_head"]["Dense_0"]["bias"])
+
+def add_noise_value_head(key, params):
+    key1, key2 = jax.random.split(key)
+    params["params"]["Dense_0"]["kernel"] = add_noise(key1, params["params"]["Dense_0"]["kernel"])
+    params["params"]["Dense_0"]["bias"] = add_noise(key2, params["params"]["Dense_0"]["bias"])
+
+    return params
 
 def zap_action_head(key, params):
     init_fn = lecun_normal()
@@ -156,7 +174,7 @@ def zap_value_head(key, params):
 
 
 class LeagueSMAX:
-    def __init__(self, network, pfsp_factor, **env_kwargs):
+    def __init__(self, network, pfsp_factor, sp_prob = 0.35, **env_kwargs):
         self._env = SMAX(**env_kwargs)
         # only one team
         self.num_agents = self._env.num_allies
@@ -171,6 +189,7 @@ class LeagueSMAX:
         self.network= network
 
         self.pfsp_factor = pfsp_factor
+        self.sp_prob = sp_prob
 
     def __getattr__(self, name: str):
         return getattr(self._env, name)
@@ -230,7 +249,7 @@ class LeagueSMAX:
 
         opp_params_pfsp = jax.tree.map(lambda x: x[index], league_state.member_params)
         sp_key, key = jax.random.split(key)
-        use_sp = jax.random.bernoulli(sp_key, 0.35) * (league_state.current_type == 0)
+        use_sp = jax.random.bernoulli(sp_key, self.sp_prob) * (league_state.current_type == 0)
         opp_params = jax.tree.map(lambda x, y: jnp.where(use_sp, x, y), league_state.sp_params, opp_params_pfsp)
 
         league_state = league_state.replace(selected_opponent=index, selected_params=opp_params, sp_enabled=use_sp)
